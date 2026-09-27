@@ -24,6 +24,19 @@ export type InventoryResult =
 
 export type StockReader = () => Promise<readonly StokItem[]>;
 
+export type StockLevel = "OUT_OF_STOCK" | "LOW" | "SAFE" | "NO_MINIMUM";
+
+/** The LOW_STOCK rule: at or below a defined minimum. */
+export function isBelowMinimum(product: Pick<InventoryProduct, "currentStock" | "minimumStock">): boolean {
+  return product.minimumStock !== null && product.currentStock <= product.minimumStock;
+}
+
+export function stockLevel(product: Pick<InventoryProduct, "currentStock" | "minimumStock">): StockLevel {
+  if (product.currentStock <= 0) return "OUT_OF_STOCK";
+  if (isBelowMinimum(product)) return "LOW";
+  return product.minimumStock === null ? "NO_MINIMUM" : "SAFE";
+}
+
 function normalizeQuery(value: string): string {
   return value.normalize("NFKC").toLowerCase().trim().replace(/\s+/g, " ");
 }
@@ -60,9 +73,7 @@ export async function executeInventoryIntent(
     return {
       intent,
       status: "SUCCESS",
-      products: items
-        .filter((item) => item.stokMinimum !== null && item.stokAkhir <= item.stokMinimum)
-        .map(toProduct),
+      products: items.map(toProduct).filter(isBelowMinimum),
     };
   }
 

@@ -67,7 +67,7 @@ test("empty product queries do not fetch or accidentally match the entire invent
 
 test("write, order, control, and unknown intents never access Sheets", async () => {
   const unsupported: StructuredIntent[] = [
-    ...(["ADD_STOCK", "REDUCE_STOCK", "SET_STOCK"] as const).map((intent) => ({ intent, product_query: "minyak", quantity: 5 })),
+    ...(["ADD_STOCK", "REDUCE_STOCK", "SET_STOCK"] as const).map((intent) => ({ intent, product_query: null, quantity: null, items: [{ product_query: "minyak", quantity: 5 }] })),
     ...(["CREATE_ORDER", "CANCEL", "CONFIRM", "HELP", "UNKNOWN"] as const).map((intent) => ({ intent, product_query: null, quantity: null })),
   ];
   for (const parsed of unsupported) {

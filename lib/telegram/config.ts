@@ -22,6 +22,14 @@ export function getWebhookSecret(): string {
   return secret;
 }
 
+/**
+ * Saving stock changes from Telegram stays off unless explicitly enabled. When off,
+ * confirmations are validated but nothing is written to Google Sheets.
+ */
+export function isStockWriteEnabled(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return env.TELEGRAM_STOCK_WRITE_ENABLED?.trim().toLowerCase() === "true";
+}
+
 export function equalSecret(left: string, right: string): boolean {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
