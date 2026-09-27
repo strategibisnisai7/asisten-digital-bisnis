@@ -75,9 +75,13 @@ test("parses decimal quantities and preserves package sizes within product queri
 
 test("multi-item stock commands: ADD, REDUCE, and SET in every supported form", () => {
   const add = stock("ADD_STOCK", ["minyak", 20], ["gula", 30], ["beras", 50]);
-  for (const input of ["tambah stok minyak 20, gula 30, beras 50", "minyak +20, gula +30, beras +50", "barang masuk: minyak 20, gula 30, beras 50", "masuk minyak 20; gula 30 dan beras 50", "barang masuk:\nminyak 20\ngula 30 kg\nberas 50"]) {
+  for (const input of ["tambah stok minyak 20, gula 30, beras 50", "minyak +20, gula +30, beras +50", "barang masuk: minyak 20, gula 30, beras 50", "masuk minyak 20; gula 30 dan beras 50"]) {
     assert.deepEqual(parseRuleIntent(input), add, input);
   }
+  // A written unit is kept so it can be checked against the product.
+  assert.deepEqual(parseRuleIntent("barang masuk:\nminyak 20\ngula 30 kg\nberas 50"), {
+    ...add, items: [{ product_query: "minyak", quantity: 20 }, { product_query: "gula", quantity: 30, unit: "kg" }, { product_query: "beras", quantity: 50 }],
+  });
   assert.deepEqual(parseRuleIntent("keluar beras 10, minyak 5"), stock("REDUCE_STOCK", ["beras", 10], ["minyak", 5]));
   assert.deepEqual(parseRuleIntent("minyak -5, gula -2"), stock("REDUCE_STOCK", ["minyak", 5], ["gula", 2]));
   assert.deepEqual(parseRuleIntent("barang keluar: beras 10"), stock("REDUCE_STOCK", ["beras", 10]));
@@ -108,7 +112,7 @@ test("the Update Stok quantity accepts a plain number only", () => {
 });
 
 test("invalid quantities stay visible for validation instead of becoming a search", () => {
-  const cases: [string, number][] = [["tambah stok minyak", Number.NaN], ["kurangi stok minyak lima", Number.NaN], ["tambah stok minyak -5", -5], ["tambah stok minyak 0", 0], ["tambah stok minyak 1e10", Number.NaN], ["koreksi minyak +5", Number.NaN]];
+  const cases: [string, number][] = [["tambah stok minyak", Number.NaN], ["kurangi stok minyak banyak", Number.NaN], ["tambah stok minyak -5", -5], ["tambah stok minyak 0", 0], ["tambah stok minyak 1e10", Number.NaN], ["koreksi minyak +5", Number.NaN]];
   for (const [input, quantity] of cases) {
     const parsed = parseRuleIntent(input);
     assert.ok("items" in parsed && parsed.items.length === 1, input);
@@ -149,6 +153,7 @@ test("menu labels and commands map to their flows", () => {
     ["/start", "START"], ["/menu", "START"], ["menu", "START"], ["/help@stok_bot", "HELP"], ["❓ Bantuan", "HELP"],
     ["📝 Update Stok", "UPDATE_STOCK"], ["⚠️ Stok Menipis", "LOW_STOCK"], ["📞 Hubungi Supplier", "CONTACT_SUPPLIER"],
     ["lihat supplier", "LIST_SUPPLIERS"], ["📊 Laporan", "REPORT"],
+    ["🔄 Stock Opname", "STOCK_OPNAME"], ["🛒 Rekomendasi Restock", "RESTOCK_RECOMMENDATION"], ["💡 Berminat?", "INTEREST"],
   ];
   for (const [input, intent] of cases) assert.equal(parseRuleIntent(input).intent, intent, input);
 });

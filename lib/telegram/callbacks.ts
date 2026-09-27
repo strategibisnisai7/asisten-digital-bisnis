@@ -5,12 +5,16 @@ import { equalSecret } from "./config";
 import type { InlineButton, TelegramEvent } from "./types";
 
 /** Static navigation buttons. They carry no data, so they need no signature. */
-export const MENU_ACTIONS = ["menu", "check", "search", "update", "upd_search", "stock_confirm", "stock_cancel", "supplier"] as const;
+export const MENU_ACTIONS = [
+  "menu", "check", "search", "update", "upd_search", "stock_confirm", "stock_cancel", "supplier", "low",
+  "opname", "opn_search", "opn_confirm", "opn_cancel", "restock", "notif_on", "notif_off", "interest",
+  "report", "help", "help_stock", "help_update", "help_opname", "help_report",
+] as const;
 export type MenuAction = typeof MENU_ACTIONS[number];
 
 export type CallbackAction =
   | { kind: "pick"; value: string; page: 0 }
-  | { kind: "search" | "low"; value: string; page: number }
+  | { kind: "search" | "low" | "restock"; value: string; page: number }
   | { kind: "menu"; value: MenuAction; page: 0 }
   // Picks a product for item `page` of a pending free-text stock request.
   | { kind: "resolve"; value: string; page: number; request: string }
@@ -19,10 +23,15 @@ export type CallbackAction =
   | { kind: "upd_action"; sku: string; intent: StockChangeIntent }
   | { kind: "upd_detail"; sku: string }
   | { kind: "upd_results"; query: string }
+  // Stock Opname flow, independently bound to the initiating chat and user.
+  | { kind: "opn_pick" | "opn_count" | "opn_detail"; sku: string }
+  | { kind: "opn_results"; query: string }
   // Supplier directory (read-only, public within the bot).
-  | { kind: "supplier"; code: string };
+  | { kind: "supplier"; code: string }
+  // "minyak 20" without a verb: the user picks what the number means.
+  | { kind: "clarify"; intent: StockChangeIntent; request: string };
 
-type SignedAction = Extract<CallbackAction, { kind: "pick" | "search" | "low" }>;
+type SignedAction = Extract<CallbackAction, { kind: "pick" | "search" | "low" | "restock" }>;
 
 // Telegram limits callback_data to 64 bytes.
 const MAX_CALLBACK_BYTES = 64;
@@ -118,6 +127,25 @@ export function updateResultsButton(label: string, query: string, scope: UpdateS
   return { text: label, callback_data: data ?? "m:upd_search" };
 }
 
+// ---------------------------------------------------------------- Stock Opname
+
+function opnameSignature(scope: UpdateScope, parts: readonly string[]): string {
+  return createHmac("sha256", scope.secret).update(JSON.stringify([scope.chatId, scope.userId, "opname", ...parts])).digest("base64url").slice(0, 16);
+}
+
+function opnameButton(prefix: "op" | "oc" | "ox" | "ob", label: string, value: string, scope: UpdateScope): InlineButton | null {
+  const action = prefix === "op" ? "pick" : prefix === "oc" ? "count" : prefix === "ox" ? "detail" : "results";
+  const data = fits(`${prefix}:${opnameSignature(scope, [action, value])}:${value}`);
+  return data ? { text: label, callback_data: data } : null;
+}
+
+export const opnamePickButton = (label: string, sku: string, scope: UpdateScope) => opnameButton("op", label, sku, scope);
+export const opnameCountButton = (label: string, sku: string, scope: UpdateScope) => opnameButton("oc", label, sku, scope);
+export const opnameDetailButton = (label: string, sku: string, scope: UpdateScope) => opnameButton("ox", label, sku, scope);
+export function opnameResultsButton(label: string, query: string, scope: UpdateScope): InlineButton {
+  return opnameButton("ob", label, query, scope) ?? menuButton(label, "opn_search");
+}
+
 // ---------------------------------------------------------------- sealed messages
 
 /**
@@ -126,7 +154,7 @@ export function updateResultsButton(label: string, query: string, scope: UpdateS
  * the text. Replies and buttons re-read that text instead of a server session.
  * "UPD" seals a stock summary awaiting confirmation; "QTY" a quantity prompt.
  */
-export type SealKind = "UPD" | "QTY";
+export type SealKind = "UPD" | "QTY" | "OPN" | "OPQ";
 export const SEAL_TTL_MS = 30 * 60 * 1000;
 
 function canonical(text: string): string {
@@ -146,7 +174,7 @@ export type OpenedSeal = { status: "VALID"; body: string } | { status: "EXPIRED"
 
 export function openSealedMessage(kind: SealKind, text: string, scope: UpdateScope, now = Date.now()): OpenedSeal {
   const lines = canonical(text).split("\n");
-  const match = lines.at(-1)?.match(/^Kode: (UPD|QTY)-([0-9A-Z]{1,10})-([0-9A-F]{12})$/);
+  const match = lines.at(-1)?.match(/^Kode: (UPD|QTY|OPN|OPQ)-([0-9A-Z]{1,10})-([0-9A-F]{12})$/);
   if (!match || match[1] !== kind) return { status: "INVALID" };
   const body = lines.slice(0, -1).join("\n");
   if (!equalSecret(match[3], sealSignature(kind, body, match[2], scope.chatId, scope.userId, scope.secret))) return { status: "INVALID" };
@@ -178,6 +206,18 @@ export function resolveButton(label: string, request: string, index: number, sku
   return { text: label, callback_data: data };
 }
 
+// ---------------------------------------------------------------- clarifying "<barang> <angka>"
+
+function signClarify(scope: UpdateScope, code: string, request: string): string {
+  return createHmac("sha256", scope.secret).update(JSON.stringify([scope.chatId, scope.userId, "clarify", code, request])).digest("base64url").slice(0, 16);
+}
+
+/** The request ("minyak 20") is written after STOCK_REQUEST_LABEL in the message itself. */
+export function clarifyButton(label: string, intent: StockChangeIntent, request: string, scope: UpdateScope): InlineButton {
+  const code = UPDATE_ACTION_CODES[intent];
+  return { text: label, callback_data: `cl:${code}:${signClarify(scope, code, request)}` };
+}
+
 // ---------------------------------------------------------------- reading callbacks
 
 export function readCallback(event: Extract<TelegramEvent, { kind: "callback" }>, secret: string): CallbackAction | null {
@@ -188,6 +228,17 @@ export function readCallback(event: Extract<TelegramEvent, { kind: "callback" }>
 
   const supplier = event.data.match(/^sp:(.{1,60})$/);
   if (supplier) return { kind: "supplier", code: supplier[1] };
+
+  const opname = event.data.match(/^(op|oc|ox|ob):([A-Za-z0-9_-]{16}):(.+)$/);
+  if (opname) {
+    const [, prefix, signature, value] = opname;
+    const action = prefix === "op" ? "pick" : prefix === "oc" ? "count" : prefix === "ox" ? "detail" : "results";
+    if (!equalSecret(signature, opnameSignature({ chatId: event.chatId, userId: event.userId, secret }, [action, value]))) return null;
+    if (prefix === "op") return { kind: "opn_pick", sku: value };
+    if (prefix === "oc") return { kind: "opn_count", sku: value };
+    if (prefix === "ox") return { kind: "opn_detail", sku: value };
+    return { kind: "opn_results", query: value };
+  }
 
   const update = event.data.match(/^(up|ux|ub):([A-Za-z0-9_-]{16}):(.+)$/) ?? event.data.match(/^(ua):([iok]):([A-Za-z0-9_-]{16}):(.+)$/);
   if (update) {
@@ -203,6 +254,14 @@ export function readCallback(event: Extract<TelegramEvent, { kind: "callback" }>
     return valid(["results", value], signature) ? { kind: "upd_results", query: value } : null;
   }
 
+  const clarify = event.data.match(/^cl:([iok]):([A-Za-z0-9_-]{16})$/);
+  if (clarify) {
+    const request = readStockRequest(event.text);
+    const scope = { chatId: event.chatId, userId: event.userId, secret };
+    if (!request || !equalSecret(clarify[2], signClarify(scope, clarify[1], request))) return null;
+    return { kind: "clarify", intent: UPDATE_ACTIONS[clarify[1]], request };
+  }
+
   const resolve = event.data.match(/^rs:(\d{1,2}):([A-Za-z0-9_-]{22}):(.+)$/);
   if (resolve) {
     const request = readStockRequest(event.text);
@@ -214,7 +273,7 @@ export function readCallback(event: Extract<TelegramEvent, { kind: "callback" }>
   let action: SignedAction;
   let signature: string;
   const skuData = event.data.match(/^sku:([A-Za-z0-9_-]{22}):(.+)$/);
-  const signed = event.data.match(/^(pick|search|low):(\d{1,6}):([A-Za-z0-9_-]{22})$/);
+  const signed = event.data.match(/^(pick|search|low|restock):(\d{1,6}):([A-Za-z0-9_-]{22})$/);
   if (skuData) {
     action = { kind: "pick", value: skuData[2], page: 0 };
     signature = skuData[1];

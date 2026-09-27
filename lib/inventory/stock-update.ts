@@ -2,7 +2,9 @@ import "server-only";
 import { readStok, type StokCellWrite } from "../google-sheets/service";
 import type { StokItem } from "../google-sheets/stok";
 import type { StockChangeIntent, StockItemRequest } from "../parser/intents";
-import { MAX_TRANSACTION_ITEMS, recordTransaction, type TransactionStore } from "./transaction-service";
+import { unitFactor } from "../parser/units";
+import { matchesQuery, suggestProducts } from "./inventory-engine";
+import { MAX_TRANSACTION_ITEMS, recordTransaction, type TransactionStore, type TransactionType } from "./transaction-service";
 
 export const MAX_STOCK_QUANTITY = 1_000_000;
 export { MAX_TRANSACTION_ITEMS };
@@ -19,11 +21,17 @@ export interface PlannedChange extends StockProduct {
 }
 
 export type QuantityProblem = "MISSING" | "NOT_POSITIVE" | "NEGATIVE" | "TOO_LARGE";
-export type LineProblem = "NOT_FOUND" | "AMBIGUOUS" | "INSUFFICIENT" | "NO_CHANGE" | "CONFLICTING_DUPLICATE";
+export type LineProblem = "NOT_FOUND" | "AMBIGUOUS" | "INSUFFICIENT" | "NO_CHANGE" | "CONFLICTING_DUPLICATE" | "UNIT_MISMATCH";
 
 export type PlanLine =
   | { ok: true; change: PlannedChange }
-  | { ok: false; query: string; quantity: number; problem: LineProblem; product?: StockProduct; matches?: number };
+  | {
+    ok: false; query: string; quantity: number; problem: LineProblem; product?: StockProduct; matches?: number;
+    /** UNIT_MISMATCH: the unit that was written. */
+    unit?: string;
+    /** NOT_FOUND: close spellings, shown as hints only. */
+    suggestions?: StockProduct[];
+  };
 
 export type StockPlan =
   | { status: "EMPTY"; intent: StockChangeIntent }
@@ -64,7 +72,7 @@ export function resolveProduct(query: string, inventory: readonly StokItem[]): S
   if (bySku.length) return bySku;
   const byName = inventory.filter((item) => normalize(item.namaBarang) === wanted);
   if (byName.length) return byName;
-  return inventory.filter((item) => normalize(item.sku).includes(wanted) || normalize(item.namaBarang).includes(wanted));
+  return inventory.filter((item) => matchesQuery(wanted, item.sku, item.namaBarang));
 }
 
 function afterChange(intent: StockChangeIntent, before: number, quantity: number): number {
@@ -97,12 +105,19 @@ export async function planStockUpdate(
   items.forEach((request, index) => {
     const matches = resolveProduct(request.product_query, inventory);
     if (matches.length === 0) {
-      failures.push({ ok: false, query: request.product_query, quantity: request.quantity, problem: "NOT_FOUND" });
+      const suggestions = suggestProducts(request.product_query, inventory.map(toProduct), 3);
+      failures.push({ ok: false, query: request.product_query, quantity: request.quantity, problem: "NOT_FOUND", ...(suggestions.length ? { suggestions } : {}) });
     } else if (matches.length > 1) {
       ambiguous.push({ index, query: request.product_query, products: matches.map(toProduct) });
     } else {
+      // "500 gram" for a product in kg becomes 0,5; "2 dus" for one counted in botol is refused.
+      const factor = request.unit ? unitFactor(request.unit, matches[0].satuan) : 1;
+      if (factor === null) {
+        failures.push({ ok: false, query: matches[0].namaBarang, quantity: request.quantity, problem: "UNIT_MISMATCH", product: toProduct(matches[0]), unit: request.unit });
+        return;
+      }
       const group = groups.get(matches[0].sku) ?? { item: matches[0], quantities: [] };
-      group.quantities.push(request.quantity);
+      group.quantities.push(round(request.quantity * factor));
       groups.set(matches[0].sku, group);
     }
   });
@@ -155,6 +170,9 @@ export interface StockWriteDependencies {
   /** Receives technical errors (history append, verification) for server logs. */
   onError?: (error: unknown) => void;
   now?: Date;
+  /** Overrides the history type for a SET operation, used only by Stock Opname. */
+  transactionType?: TransactionType;
+  transactionNote?: string;
 }
 
 function validDirection(intent: StockChangeIntent, change: ConfirmedChange): boolean {
@@ -207,7 +225,7 @@ export async function applyStockUpdate(
   let transactionId: string;
   try {
     const recorded = await recordTransaction({
-      type: intent,
+      type: dependencies.transactionType ?? intent,
       user: dependencies.user,
       at: dependencies.now,
       stockCells: writes,
@@ -217,7 +235,7 @@ export async function applyStockUpdate(
           sku: change.sku, productName: name, unit,
           quantity: intent === "REDUCE_STOCK" ? round(change.before - change.after) : round(change.after - change.before),
           stockBefore: change.before, stockAfter: change.after,
-          note: intent === "SET_STOCK" ? `Koreksi ke ${change.after}` : "",
+          note: dependencies.transactionNote ?? (intent === "SET_STOCK" ? `Koreksi ke ${change.after}` : ""),
         };
       }),
     }, dependencies.transactions);
@@ -243,4 +261,18 @@ export async function applyStockUpdate(
   }
   const verified = changes.every((change) => typeof change.actual === "number" && same(change.actual, change.after));
   return { status: verified ? "SAVED" : "UNVERIFIED", changes, transactionId };
+}
+
+/** Applies a physical count as an Adjustment and records the dedicated history type. */
+export function applyStockOpname(
+  confirmed: readonly ConfirmedChange[],
+  dependencies: StockWriteDependencies,
+): Promise<ApplyResult> {
+  const [change] = confirmed;
+  const difference = change ? round(change.after - change.before) : 0;
+  return applyStockUpdate("SET_STOCK", confirmed, {
+    ...dependencies,
+    transactionType: "STOCK_OPNAME",
+    transactionNote: `Stock opname; selisih ${difference >= 0 ? "+" : ""}${difference}`,
+  });
 }

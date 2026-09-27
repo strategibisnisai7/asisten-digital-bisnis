@@ -84,7 +84,10 @@ export function computeMovements(entries: readonly TransactionEntry[], stock: re
       round(list.filter((entry) => entry.type === type).reduce((total, entry) => total + (Number.isFinite(value(entry)) ? value(entry) : 0), 0));
     const incoming = sum("ADD_STOCK", (entry) => entry.quantity);
     const outgoing = sum("REDUCE_STOCK", (entry) => entry.quantity);
-    const adjustment = sum("SET_STOCK", (entry) => entry.stockAfter - entry.stockBefore);
+    const adjustment = round(
+      sum("SET_STOCK", (entry) => entry.stockAfter - entry.stockBefore)
+      + sum("STOCK_OPNAME", (entry) => entry.stockAfter - entry.stockBefore),
+    );
     const opening = first.stockBefore;
     const closing = round(opening + incoming - outgoing + adjustment);
     const name = current.get(sku)?.namaBarang ?? first.productName;

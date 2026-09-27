@@ -14,8 +14,12 @@ Endpoint: `POST /api/telegram/webhook`. Runtime Node.js; hasil HTTP tidak berisi
 | `lib/telegram/callbacks.ts` | Signature callback yang terikat chat, SKU/query/halaman, dan segel ringkasan update stok |
 | `lib/telegram/types.ts` | Tipe dan pembacaan subset payload update Telegram |
 | `lib/telegram/config.ts` | Konfigurasi dan error yang tidak menyertakan credentials |
-| `lib/parser/rule-parser.ts` | Perintah, label menu, variasi cek stok, update stok multi-barang, dan kebutuhan barang |
+| `lib/parser/rule-parser.ts` | Perintah, label menu, bahasa sehari-hari, update stok multi-barang, filter, riwayat, analisis, dan bantuan per topik |
+| `lib/parser/numbers.ts`, `units.ts`, `period.ts`, `fuzzy.ts` | Kata bilangan, satuan, periode, dan toleransi typo (murni, tanpa jaringan) |
+| `lib/inventory/insights.ts` | Riwayat transaksi dan peringkat barang masuk/keluar dari Riwayat Transaksi (hanya membaca) |
 | `lib/inventory/stock-update.ts` | Resolusi, validasi, ringkasan, dan penerapan update stok |
+| `lib/notifications/*`, `app/api/cron/low-stock/route.ts` | Preferensi per pengguna, deduplikasi kondisi, dan notifikasi terjadwal |
+| `lib/restock/restock-service.ts` | Rekomendasi restock dari Stok, Master Barang, dan Supplier |
 | `lib/inventory/transaction-service.ts` | Satu-satunya jalur write stok: sel Stok + Riwayat Transaksi secara atomik; membaca riwayat |
 | `lib/supplier/supplier-service.ts`, `lib/supplier/whatsapp.ts` | Data supplier, pengelompokan kebutuhan per supplier, deep link WhatsApp (hanya membaca) |
 | `lib/report/report-service.ts`, `lib/report/pdf-generator.ts` | Data laporan bulan berjalan dan pembuatan satu PDF |
@@ -30,6 +34,7 @@ Endpoint: `POST /api/telegram/webhook`. Runtime Node.js; hasil HTTP tidak berisi
 
 - `TELEGRAM_BOT_TOKEN`: token asli dari BotFather, hanya di server.
 - `TELEGRAM_WEBHOOK_SECRET`: secret independen 32–256 karakter `[A-Za-z0-9_-]`. Secret acak sudah disiapkan di `.env` lokal tanpa ditampilkan.
+- `CRON_SECRET`: secret acak minimal 16 karakter untuk autentikasi endpoint Vercel Cron.
 - Ketiga `GOOGLE_SHEETS_*` tetap digunakan oleh service Sheets.
 
 Jangan beri prefix `NEXT_PUBLIC_`. Jangan masukkan token dalam query URL aplikasi, log, atau chat. Header setiap request webhook wajib berisi `X-Telegram-Bot-Api-Secret-Token` yang cocok. Endpoint menolak request tanpa secret, termasuk di development.
@@ -40,19 +45,40 @@ Kirim `/start` untuk sambutan dan menu utama (keyboard persisten):
 
 - 🔍 Cek Stok / 📋 Cari Barang → meminta nama barang atau SKU, dengan contoh.
 - 📝 Update Stok → cari barang, pilih barang, lalu pilih Barang Masuk / Barang Keluar / Koreksi Stok (lihat "Update stok").
+- 🔄 Stock Opname → cari dan pilih barang, masukkan stok fisik, pratinjau selisih, lalu konfirmasi atau batal.
+- 🛒 Rekomendasi Restock → kebutuhan hingga batas minimum, supplier, dan WhatsApp bila kontak valid.
 - 📊 Laporan → langsung membuat satu PDF laporan bulan berjalan (lihat "Laporan").
 - ⚠️ Stok Menipis → daftar barang di bawah minimum beserta stok dan minimumnya.
 - 📞 Hubungi Supplier → daftar supplier dan kontak WhatsApp (lihat "Hubungi Supplier").
 - ❓ Bantuan → contoh kalimat yang bisa langsung dicoba.
+- 💡 Berminat? → informasi singkat untuk menghubungi admin penyedia bot.
 
 Pengguna tetap bisa langsung mengetik tanpa memilih menu. Variasi seperti "cek stok", "cek stock", "lihat stok", "stok minyak", "berapa stok minyak", "minyak tinggal berapa", dan "stok beras ada berapa" dipahami sebagai cek stok. Perintah tanpa nama barang membuka prompt yang sesuai.
 
 Hasil pencarian:
 
-- Satu hasil → detail langsung ("🔎 Ditemukan").
-- Beberapa hasil → "🔎 Saya menemukan N barang untuk "…"" dengan tombol berlabel nama produk. SKU baru ditampilkan setelah produk dipilih; tombol membaca ulang data terbaru dengan pencocokan SKU eksak.
-- Tidak ada hasil → pesan ramah dengan tombol 📋 Cari Barang.
-- Halaman hanya disebut bila hasil lebih dari 8 barang; navigasi memakai ◀️ Sebelumnya / Berikutnya ▶️.
+- Satu hasil → detail langsung ("🔎 Ditemukan") dengan tombol 📥 Barang Masuk / 📤 Barang Keluar / 🔄 Koreksi Stok, sehingga update tidak perlu mencari ulang.
+- Beberapa hasil → "🔎 Saya menemukan N barang untuk "…"" dengan daftar ringkas (nama, SKU, stok, status) dan tombol bernomor; tombol membaca ulang data terbaru dengan pencocokan SKU eksak.
+- Tidak ada hasil → pesan ramah; bila ada ejaan yang mirip ("mnyak"), tampil "Mungkin maksud Anda" dengan tombol barang. Tidak ada barang yang dipilih otomatis.
+- Halaman hanya disebut bila hasil lebih dari 8 barang; navigasi memakai ◀️ Sebelumnya / Berikutnya ▶️ dan mengedit pesan yang sama (`editMessageText`), dengan pesan baru sebagai cadangan.
+
+### Bahasa bebas (Rule-Based Parser, tanpa AI)
+
+Parser berada di `lib/parser/`: `rule-parser.ts` (normalisasi, slang, aturan intent, fallback typo, `analyzeMessage`), `numbers.ts` (angka dan kata bilangan), `units.ts` (satuan dan konversi), `period.ts` (periode), `fuzzy.ts` (toleransi typo). Sinonim ada di `SYNONYMS` dan mudah ditambah. Contoh yang didukung dan diuji (`tests/parser-advanced.test.ts`):
+
+| Kebutuhan | Contoh |
+| --- | --- |
+| Cek stok | `stok minyak`, `berapa sisa beras?`, `minyak masih ada?`, `stok gula brp` |
+| Cari | `cari minyak goreng`, `ada barang merek ABC?`, `tampilkan produk beras` |
+| Stok menipis | `stok kritis`, `mana yang perlu restock?` |
+| Filter | `barang di bawah 10`, `stok kurang dari 5 pcs`, `stok antara 10 sampai 20`, `barang kosong` |
+| Masuk / keluar | `minyak masuk 20`, `tambah beras 5 kg`, `baru datang gula 10 pcs`, `beras terjual 10 kg`, `tambah beras setengah lusin` |
+| Koreksi | `stok minyak sekarang 25`, `koreksi beras jadi 100 kg` |
+| Riwayat | `riwayat minyak`, `transaksi hari ini`, `barang masuk kemarin`, `riwayat gula 1/9 - 15/9` |
+| Analisis | `barang paling banyak keluar minggu ini`, `produk terlaris bulan ini`, `barang paling sering masuk` (tanpa periode: bulan ini) |
+| Bantuan | `cara pakai`, `apa saja yang bisa dilakukan?`, `cara update stok`, `bantuan stock opname` |
+
+Aturan keamanan: perubahan stok selalu berakhir di pratinjau + konfirmasi. Satuan dicek terhadap satuan barang (gram↔kg dan ml↔liter dikonversi; `pcs`/`unit` cocok untuk barang yang dihitung per buah; `dus`/`box`/`pack` ditolak karena isinya tidak diketahui). `gula 5` tanpa kata kerja memunculkan pilihan Masuk/Keluar/Jadikan, tidak ditebak. Angka saja (`20`) hanya dibaca sebagai jumlah bila membalas pertanyaan jumlah; di luar itu hanya SKU yang sama persis. Koreksi typo hanya pada kata perintah, dan perubahan stok hanya diterima bila typo ada di kata pertama (`tambh gula 10`), sehingga nama barang tidak pernah diubah menjadi perintah.
 
 Status stok memakai aturan engine: 🔴 Habis (stok 0), 🟡 Menipis (stok ≤ minimum), 🟢 Aman. Pesan memakai plain text agar nama barang yang mengandung HTML/Markdown tetap aman. Semua teks respons berada di `formatting.ts`.
 
@@ -92,6 +118,22 @@ Semua write stok melewati `recordTransaction()` di `lib/inventory/transaction-se
 Riwayat: satu baris per barang, satu ID per aksi (`TRX-001`, `TRX-002`, …), tanggal `dd/mm/yyyy` dan waktu `HH:mm` dibuat server dalam Asia/Jakarta, jenis `MASUK`/`KELUAR`/`KOREKSI`, dan user dari akun Telegram (`@username (id)`). Untuk SET, Quantity berisi selisih koreksi dan Keterangan `Koreksi ke <target>`.
 
 **Penyimpanan dari Telegram default nonaktif.** Tanpa `TELEGRAM_STOCK_WRITE_ENABLED=true`, konfirmasi hanya memvalidasi ringkasan dan menjawab bahwa penyimpanan belum diaktifkan. Tab riwayat dibuat sekali dengan `npm run setup:transactions` (hanya membuat tab/header bila belum ada).
+
+## Stock Opname
+
+Alur: `Stock Opname → Cari Barang → Pilih Barang → Masukkan Stok Fisik → Pratinjau Selisih → Konfirmasi/Batal`. Prompt dan pratinjau disegel dengan HMAC yang terikat chat dan pengguna. Input wajib angka non-negatif; selisih dihitung sebagai `stok fisik - stok sistem`.
+
+Selisih nol berhenti tanpa write. Setelah konfirmasi, hanya kolom `Adjustment` (G) yang ditambah sebesar selisih; `Stok Akhir` (H) tetap formula. Perubahan G dan baris `Riwayat Transaksi` berjenis `STOCK_OPNAME` disimpan dalam satu batch atomik. Pembacaan ulang stok mencegah konfirmasi lama/ganda menerapkan koreksi tambahan.
+
+## Notifikasi stok menipis
+
+Tombol pada tampilan Stok Menipis mengaktifkan atau menonaktifkan notifikasi per chat dan pengguna. Preferensi serta snapshot SKU menipis disimpan pada tab `Notifikasi Stok`, yang dibuat otomatis bila belum ada. Cron hanya mengirim barang yang baru memasuki kondisi `Stok Akhir <= Stok Minimum`; kondisi sama tidak dikirim ulang, sedangkan barang yang pulih lalu menipis kembali dapat memicu notifikasi baru.
+
+`vercel.json` menjalankan `GET /api/cron/low-stock` setiap hari pukul 01:00 UTC (08:00 WIB). Endpoint wajib menerima `Authorization: Bearer <CRON_SECRET>`. Notifikasi menggabungkan beberapa barang serta menyediakan tombol **Lihat Stok Menipis** dan **Rekomendasi Restock**.
+
+## Rekomendasi Restock
+
+Fitur membaca `Stok`, `Master Barang`, dan `Supplier`. Rekomendasi adalah `max(0, Stok Minimum - Stok Akhir)`; nilai nol tetap ditampilkan sebagai peringatan ketika stok tepat di batas minimum. Supplier dicocokkan berdasarkan kode lalu nama. Tombol WhatsApp hanya muncul bila kontak dapat dinormalisasi ke `wa.me`; tidak ada pesanan atau perubahan stok otomatis.
 
 ## Hubungi Supplier
 
@@ -133,7 +175,7 @@ Langkah berikut belum dijalankan:
 
 1. Simpan project di repository Git yang akan diimpor ke Vercel. Pastikan `.env` dan key JSON tidak ikut commit.
 2. Di Vercel, buat project dari repository tersebut dan gunakan preset Next.js. Build command: `npm run build`.
-3. Tambahkan tiga environment Google Sheets, `TELEGRAM_BOT_TOKEN`, dan `TELEGRAM_WEBHOOK_SECRET` melalui pengaturan environment Vercel untuk Production. Isi nilainya langsung di dashboard. Deploy/redeploy setelah konfigurasi disimpan.
+3. Tambahkan tiga environment Google Sheets, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, dan `CRON_SECRET` melalui pengaturan environment Vercel untuk Production. Service account harus memiliki izin Editor. Isi nilainya langsung di dashboard, lalu deploy/redeploy.
 4. Setelah deployment berhasil, Vercel menyediakan URL HTTPS. Gunakan domain production yang stabil, misalnya `https://nama-project.vercel.app`, bukan URL preview sementara. Endpoint nanti adalah `https://<domain-production>/api/telegram/webhook`.
 5. Pastikan Telegram dapat mencapai endpoint tanpa halaman login Vercel Deployment Protection; autentikasi endpoint tetap memakai header secret Telegram. Endpoint test `/api/test/sheets` sudah dinonaktifkan pada production (404 sebelum membaca inventory).
 6. Baru setelah URL siap dan pendaftaran diizinkan, panggil Bot API `setWebhook` menggunakan token dari environment dengan body `url` berisi endpoint production, `secret_token` berisi nilai `TELEGRAM_WEBHOOK_SECRET`, serta `allowed_updates: ["message", "callback_query"]`. Jangan memakai `drop_pending_updates: true` tanpa sengaja.

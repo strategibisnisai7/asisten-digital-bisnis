@@ -43,7 +43,7 @@ export async function readSheetRange(range: string): Promise<SheetValues> {
   }
 }
 
-export interface GridCellUpdate { sheetTitle: string; rowNumber: number; columnIndex: number; value: number }
+export interface GridCellUpdate { sheetTitle: string; rowNumber: number; columnIndex: number; value: string | number }
 export interface GridAppend { sheetTitle: string; rows: readonly (readonly (string | number)[])[] }
 
 const cellValue = (value: string | number): sheets_v4.Schema$CellData =>

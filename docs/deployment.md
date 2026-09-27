@@ -1,6 +1,6 @@
 # Persiapan GitHub dan Vercel
 
-Project menggunakan Next.js App Router di root repository. Node.js ditetapkan ke `22.x` di `package.json` agar versi mayor lokal dan Vercel konsisten. `package-lock.json` disertakan untuk instalasi dependency. Tidak diperlukan `vercel.json` khusus: preset Next.js mendeteksi route server dan menggunakan `npm run build`.
+Project menggunakan Next.js App Router di root repository. Node.js ditetapkan ke `22.x` di `package.json`. `vercel.json` mendaftarkan Cron harian untuk notifikasi stok menipis.
 
 ## Credentials dan Git
 
@@ -29,7 +29,7 @@ npm run lint
 npm run build
 ```
 
-Test integrasi membutuhkan `.env` lokal. Test hanya membaca Google Sheets dan menangkap respons Telegram; tidak mengirim pesan atau mendaftarkan webhook. Build tidak membutuhkan pemanggilan Sheets/Telegram. Endpoint diagnostik `GET /api/test/sheets` mengembalikan 404 di production; tersedia hanya untuk pengujian development.
+Test integrasi membutuhkan `.env` lokal. Test menangkap respons Telegram dan tidak mengirim pesan atau mendaftarkan webhook; `test:telegram` dapat membuat tab preferensi notifikasi jika belum ada. Build tidak membutuhkan pemanggilan Sheets/Telegram. Endpoint diagnostik `GET /api/test/sheets` mengembalikan 404 di production.
 
 ## Langkah pengguna: push ke GitHub
 
@@ -48,17 +48,19 @@ Jika `origin` sudah tersedia, periksa remote tersebut terlebih dahulu dan jangan
 
 1. Impor repository GitHub di Vercel sebagai project Next.js, dengan root directory project ini.
 2. Pilih Node.js 22.x. Gunakan install command `npm ci`, build command `npm run build`, dan output directory default Next.js.
-3. Masukkan lima environment variable berikut melalui dashboard Vercel untuk environment Production:
+3. Masukkan enam environment variable berikut melalui dashboard Vercel untuk environment Production:
 
    - `GOOGLE_SHEETS_SPREADSHEET_ID`
    - `GOOGLE_SHEETS_CLIENT_EMAIL`
    - `GOOGLE_SHEETS_PRIVATE_KEY`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_WEBHOOK_SECRET`
+   - `CRON_SECRET` (acak, minimal 16 karakter; Vercel mengirimkannya sebagai Bearer token)
 
 4. Salin nilai dari konfigurasi lokal secara pribadi. Untuk private key, gunakan PEM multiline atau string dengan escaped newline yang didukung service. Jangan beri prefix `NEXT_PUBLIC_` atau mengunggah file credentials JSON.
-5. Deploy setelah environment disimpan. Vercel memberikan URL HTTPS; gunakan domain production stabil untuk webhook nantinya.
-6. Pendaftaran webhook adalah tindakan terpisah setelah deployment siap. Lihat [panduan Telegram](telegram.md) untuk body `setWebhook`, verifikasi akses endpoint, dan pengujian `/start`.
+5. Pastikan service account memiliki izin **Editor** pada spreadsheet dan `TELEGRAM_STOCK_WRITE_ENABLED=true` hanya bila update/opname Telegram boleh disimpan.
+6. Deploy setelah environment disimpan. Konfigurasi `vercel.json` menjalankan `GET /api/cron/low-stock` setiap hari pukul 01:00 UTC (08:00 WIB). Vercel Cron hanya aktif pada production.
+7. Pendaftaran webhook adalah tindakan terpisah setelah deployment siap. Lihat [panduan Telegram](telegram.md) untuk body `setWebhook`, verifikasi akses endpoint, dan pengujian `/start`.
 
 Pada tahap persiapan ini tidak ada push, deployment, pendaftaran webhook, atau perubahan data Sheets yang dijalankan. Logic otorisasi pengguna Telegram dan deduplikasi update masih mengikuti keterbatasan yang dijelaskan pada panduan Telegram.
 

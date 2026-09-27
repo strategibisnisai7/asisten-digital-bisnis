@@ -2,7 +2,7 @@
 
 Target arsitektur: Telegram → Rule Parser → Gemini sebagai fallback → Structured Intent → Google Sheets → Telegram → wa.me.
 
-Google Sheets adalah source of truth inventory. Tahap saat ini menyediakan Rule Parser, Inventory Engine untuk operasi baca, service Google Sheets, dan adapter/webhook Telegram untuk pengujian lokal. Webhook belum didaftarkan ke Telegram. Gemini, wa.me, dan operasi tulis belum diimplementasikan.
+Google Sheets adalah source of truth inventory. Project menyediakan Rule Parser, Inventory Engine, update stok dan stock opname atomik, rekomendasi restock, notifikasi stok menipis terjadwal, serta adapter/webhook Telegram. WhatsApp memakai deep link `wa.me`; bot tidak membuat pesanan otomatis.
 
 Panduan Telegram, test lokal, dan langkah deployment: [docs/telegram.md](docs/telegram.md).
 
@@ -14,7 +14,7 @@ File `.env` lokal telah disiapkan dan diabaikan oleh Git. Untuk checkout baru, s
 
 1. Buat/pilih project Google Cloud dan aktifkan **Google Sheets API**.
 2. Buat service account dan key JSON untuk aplikasi ini. Simpan key di tempat aman di luar repository.
-3. Bagikan spreadsheet `1kmZOAUUd2Nx_xYQwBYHPwDWokgMH9WTCD1ENr8Px1ak` kepada email service account sebagai **Viewer**.
+3. Bagikan spreadsheet kepada email service account sebagai **Editor**. Izin tulis diperlukan untuk `Adjustment`, `Riwayat Transaksi`, dan preferensi notifikasi.
 4. Isi `GOOGLE_SHEETS_CLIENT_EMAIL` dengan `client_email` dari JSON dan `GOOGLE_SHEETS_PRIVATE_KEY` dengan `private_key` dari JSON di `.env`. Isi `GOOGLE_SHEETS_SPREADSHEET_ID` dengan ID pada langkah 3; semua nilai dalam `.env.example` sengaja kosong.
 5. Untuk private key, gunakan tanda kutip ganda dengan newline `\n` atau PEM multiline. Jangan kirim key lewat chat atau gunakan prefix `NEXT_PUBLIC_`.
 
@@ -30,7 +30,7 @@ Jalankan `npm run dev`, lalu buka `http://localhost:3000/api/test/sheets` untuk 
 
 `lib/google-sheets/service.ts` mengekspor `readStok()` untuk pemakaian di server Node.js (Server Component atau Route Handler). Modul dilindungi `server-only`; jangan impor ke Client Component atau Edge runtime. Konfigurasi dibaca saat fungsi dipanggil sehingga build tidak memerlukan credentials.
 
-Service menggunakan scope `spreadsheets.readonly` dan membaca `'Stok'!A1:L` dengan `UNFORMATTED_VALUE`, sehingga angka dan hasil perhitungan rumus dibaca dari Sheets. Setiap pemanggilan membaca ulang sumber tanpa cache aplikasi. Tidak ada operasi tulis.
+Pembacaan memakai scope `spreadsheets.readonly`; jalur mutasi meminta scope `spreadsheets` hanya saat diperlukan. Inventory membaca `'Stok'!A1:L` dengan `UNFORMATTED_VALUE`, sehingga angka dan hasil perhitungan rumus dibaca dari Sheets. Stock opname hanya menulis kolom G dan riwayat dalam satu `spreadsheets.batchUpdate`; kolom H tidak pernah ditulis.
 
 Header wajib berada pada baris 1 dengan urutan:
 
@@ -40,7 +40,7 @@ Header wajib berada pada baris 1 dengan urutan:
 
 Kolom H dibaca langsung dari spreadsheet, bukan dihitung ulang sebagai pengganti data sumber. Rumus baris 2 diharapkan `=D2+E2-F2+G2`. Kolom D–G kosong diperlakukan sebagai 0; I kosong menjadi `null`. Baris kosong, termasuk template dengan hanya rumus H/J, diabaikan. SKU duplikat, header tidak sesuai, angka tidak valid, serta H kosong/error menghasilkan error yang aman. Simpan SKU sebagai teks di Sheets jika memiliki nol di depan.
 
-Sheet `Master Barang` dan `Supplier` belum dibaca karena struktur kolomnya belum ditentukan.
+Rekomendasi restock membaca `Stok`, `Master Barang` (`SKU`, `Supplier Utama`, `Kode Supplier`), dan `Supplier` (`Kode Supplier`, `Nama Supplier`, `Kontak`). Tab `Notifikasi Stok` dibuat otomatis saat fitur notifikasi pertama dipakai, dengan header: `Chat ID`, `User ID`, `Aktif`, `Thread ID`, `SKU Menipis Terakhir`, `Diperbarui`.
 
 ```bash
 npm test             # Unit test tanpa credentials atau koneksi Google
@@ -54,9 +54,9 @@ npm run build
 npm run check:secrets # Periksa kandidat file repository tanpa mencetak nilai secret
 ```
 
-Test integrasi hanya mencetak jumlah barang dan hasil pemeriksaan formula; tidak mencetak credentials atau seluruh isi sheet. Exit code 1 berarti konfigurasi/koneksi/struktur/nilai formula bermasalah; header valid tanpa barang dilaporkan sebagai 0 barang. Script memakai `@next/env` untuk memuat konfigurasi seperti `next dev`, dan kondisi `react-server` agar modul server-only dapat dipakai dari Node.js. Jalankan tanpa `NODE_ENV=test`.
+Test integrasi tidak mencetak credentials atau seluruh isi sheet. `test:telegram` dapat membuat tab `Notifikasi Stok` beserta header bila belum ada, tetapi tidak mengubah stok atau mengirim pesan Telegram. Exit code 1 berarti konfigurasi/koneksi/struktur/nilai formula bermasalah. Script memakai `@next/env` untuk memuat konfigurasi seperti `next dev`, dan kondisi `react-server` agar modul server-only dapat dipakai dari Node.js. Jalankan tanpa `NODE_ENV=test`.
 
-Jika muncul `CONFIG`, lengkapi `.env`. Untuk `ACCESS`, periksa API dan izin Viewer. Untuk `NOT_FOUND`, periksa ID serta akses spreadsheet. Untuk `SCHEMA`, periksa header atau sel yang disebutkan. Jangan mencetak objek error mentah dari Google karena dapat memuat metadata autentikasi.
+Jika muncul `CONFIG`, lengkapi `.env`. Untuk `ACCESS`, periksa API dan izin Editor. Untuk `NOT_FOUND`, periksa ID serta akses spreadsheet. Untuk `SCHEMA`, periksa header atau sel yang disebutkan. Jangan mencetak objek error mentah Google karena dapat memuat metadata autentikasi.
 
 Referensi: [Google Sheets values.get](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets.values/get) dan [scope API](https://developers.google.com/workspace/sheets/api/scopes).
 
@@ -64,7 +64,7 @@ Referensi: [Google Sheets values.get](https://developers.google.com/workspace/sh
 
 Tiga tanggung jawab dipisahkan:
 
-- `lib/parser/intents.ts` mendefinisikan 11 intent dan tipe `StructuredIntent`. Setiap hasil berisi `intent`, `product_query`, dan `quantity`.
+- `lib/parser/intents.ts` mendefinisikan intent dan tipe `StructuredIntent`. Setiap hasil berisi `intent`, `product_query`, dan `quantity`.
 - `lib/parser/rule-parser.ts` mengekspor fungsi murni `parseRuleIntent(text)`. Parser tidak membaca spreadsheet atau environment.
 - `lib/inventory/inventory-engine.ts` mengekspor `executeInventoryIntent(intent)`. Engine server-side menjalankan intent baca melalui `readStok()`, yang menggunakan `lib/sheets/google-sheets.ts` untuk akses Google Sheets.
 

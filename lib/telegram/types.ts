@@ -22,6 +22,8 @@ export interface TelegramBot {
   answerCallbackQuery(id: string): Promise<void>;
   /** Replaces the buttons of a sent message; an empty list removes them. */
   setInlineKeyboard?(chatId: number, messageId: number, rows: (InlineButton | UrlButton)[][]): Promise<void>;
+  /** Replaces the text and inline buttons of a sent message (pagination). */
+  editMessage?(chatId: number, messageId: number, reply: TelegramReply): Promise<void>;
 }
 /** `userId` is the Telegram user (sender); `user` is a readable label for the history. */
 export type TelegramEvent =

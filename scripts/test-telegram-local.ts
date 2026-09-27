@@ -86,7 +86,7 @@ async function main() {
   assert.ok(sent.at(-1)!.text.includes("\nStok saat ini\n"));
   assert.ok(sent.at(-1)!.text.includes(`\nSKU\n${source[0].sku}`));
   console.log(`PASS: webhook auth, ${flows.length} alur teks, pilihan produk, dan laporan PDF (${documents[0].bytes.byteLength} byte); sumber ${source.length} barang dari Sheets.`);
-  console.log("Respons Telegram ditangkap oleh test. Tidak ada pesan Telegram dikirim, data diubah, atau webhook didaftarkan.");
+  console.log("Respons Telegram ditangkap oleh test. Tidak ada pesan Telegram dikirim, stok diubah, atau webhook didaftarkan; tab preferensi notifikasi dapat dibuat bila belum ada.");
 }
 
 main().catch(() => {

@@ -13,11 +13,12 @@ const ID_RANGE = `'${TRANSACTION_SHEET}'!A2:A`;
 const DATA_RANGE = `'${TRANSACTION_SHEET}'!A2:L`;
 export const MAX_TRANSACTION_ITEMS = 20;
 
-export type TransactionType = StockChangeIntent;
+export type TransactionType = StockChangeIntent | "STOCK_OPNAME";
 export const TRANSACTION_TYPE_LABELS: Record<TransactionType, string> = {
   ADD_STOCK: "MASUK",
   REDUCE_STOCK: "KELUAR",
   SET_STOCK: "KOREKSI",
+  STOCK_OPNAME: "STOCK_OPNAME",
 };
 
 export interface TransactionItem {
@@ -165,6 +166,7 @@ function parseType(value: string): TransactionType | null {
   if (/^(?:MASUK|BARANG MASUK|ADD_STOCK)$/.test(label)) return "ADD_STOCK";
   if (/^(?:KELUAR|BARANG KELUAR|REDUCE_STOCK)$/.test(label)) return "REDUCE_STOCK";
   if (/^(?:KOREKSI|KOREKSI STOK|SET_STOCK|ADJUSTMENT)$/.test(label)) return "SET_STOCK";
+  if (/^(?:STOCK_OPNAME|STOCK OPNAME|OPNAME)$/.test(label)) return "STOCK_OPNAME";
   return null;
 }
 

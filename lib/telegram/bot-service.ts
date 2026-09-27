@@ -3,7 +3,7 @@ import { getTelegramToken, TelegramError } from "./config";
 import { visibleLength, withFooter } from "./footer";
 import type { TelegramBot } from "./types";
 
-type Method = "sendMessage" | "answerCallbackQuery" | "editMessageReplyMarkup" | "sendDocument";
+type Method = "sendMessage" | "answerCallbackQuery" | "editMessageReplyMarkup" | "editMessageText" | "sendDocument";
 
 // Telegram accepts documents up to 50 MB through the Bot API.
 const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
@@ -51,6 +51,14 @@ export function createTelegramBot(fetcher: typeof fetch = fetch): TelegramBot {
     },
     async answerCallbackQuery(id) {
       await call("answerCallbackQuery", JSON.stringify({ callback_query_id: id }));
+    },
+    async editMessage(chatId, messageId, reply) {
+      if (!reply.text || visibleLength(reply.text) > 4096) throw new TelegramError("API", "Panjang pesan Telegram tidak valid.");
+      // Only inline keyboards can be edited in place; the footer is added the same way as for new messages.
+      const markup = reply.reply_markup && "inline_keyboard" in reply.reply_markup ? { reply_markup: reply.reply_markup } : {};
+      await call("editMessageText", JSON.stringify({
+        chat_id: chatId, message_id: messageId, text: withFooter(reply.text), parse_mode: "HTML", link_preview_options: { is_disabled: true }, ...markup,
+      }));
     },
     async setInlineKeyboard(chatId, messageId, rows) {
       await call("editMessageReplyMarkup", JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: rows } }));
