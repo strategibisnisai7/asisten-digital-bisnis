@@ -12,10 +12,9 @@ export function normalizeWhatsAppNumber(contact: string): string | null {
 }
 
 /**
- * A wa.me deep link that opens WhatsApp with the text filled in. The WhatsApp API is
- * not used and nothing is sent automatically; the user presses send. Without a number,
- * WhatsApp lets the user pick the contact.
+ * A wa.me deep link that opens a chat with the supplier. The WhatsApp API is not
+ * used and nothing is sent automatically.
  */
-export function whatsappLink(number: string | null, message: string): string {
-  return `https://wa.me/${number ?? ""}?text=${encodeURIComponent(message)}`;
+export function whatsappLink(number: string): string {
+  return `https://wa.me/${number}`;
 }

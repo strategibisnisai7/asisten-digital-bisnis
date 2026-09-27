@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseOrderReply, parseRuleIntent, parseStockReply } from "../lib/parser/rule-parser";
+import { parseQuantityInput, parseRuleIntent } from "../lib/parser/rule-parser";
 import type { StockChangeIntent, StructuredIntent } from "../lib/parser/intents";
 
 const examples: [string, StructuredIntent][] = [
@@ -15,7 +15,6 @@ const examples: [string, StructuredIntent][] = [
   ["kurangi stok minyak 5", { intent: "REDUCE_STOCK", product_query: null, quantity: null, items: [{ product_query: "minyak", quantity: 5 }] }],
   ["set stok minyak 50", { intent: "SET_STOCK", product_query: null, quantity: null, items: [{ product_query: "minyak", quantity: 50 }] }],
   ["📊 Laporan", { intent: "REPORT", product_query: null, quantity: null }],
-  ["buat pesanan", { intent: "CREATE_ORDER", product_query: null, quantity: null }],
   ["batal", { intent: "CANCEL", product_query: null, quantity: null }],
   ["ya", { intent: "CONFIRM", product_query: null, quantity: null }],
   ["tidak", { intent: "CANCEL", product_query: null, quantity: null }],
@@ -27,7 +26,6 @@ const examples: [string, StructuredIntent][] = [
   ["cek stok minyak", { intent: "CHECK_STOCK", product_query: "minyak", quantity: null }],
   ["lihat stok beras", { intent: "CHECK_STOCK", product_query: "beras", quantity: null }],
   ["cari minyak", { intent: "SEARCH_PRODUCT", product_query: "minyak", quantity: null }],
-  ["pesan minyak 20", { intent: "CREATE_ORDER", product_query: null, quantity: null, items: [{ product_query: "minyak", quantity: 20 }] }],
   ["apa kabar", { intent: "UNKNOWN", product_query: null, quantity: null }],
 ];
 
@@ -86,18 +84,27 @@ test("multi-item stock commands: ADD, REDUCE, and SET in every supported form", 
   assert.deepEqual(parseRuleIntent("koreksi stok minyak jadi 50, gula jadi 20"), stock("SET_STOCK", ["minyak", 50], ["gula", 20]));
   assert.deepEqual(parseRuleIntent("set stok minyak 50"), stock("SET_STOCK", ["minyak", 50]));
   // Duplicates are kept here and merged after the product is resolved.
-  assert.deepEqual(parseStockReply("ADD_STOCK", "minyak 20, minyak 10"), stock("ADD_STOCK", ["minyak", 20], ["minyak", 10]));
+  assert.deepEqual(parseRuleIntent("barang masuk: minyak 20, minyak 10"), stock("ADD_STOCK", ["minyak", 20], ["minyak", 10]));
+  // Free chat with the verb after the product.
+  assert.deepEqual(parseRuleIntent("minyak masuk 20"), stock("ADD_STOCK", ["minyak", 20]));
+  assert.deepEqual(parseRuleIntent("beras keluar 10"), stock("REDUCE_STOCK", ["beras", 10]));
+  assert.deepEqual(parseRuleIntent("beras keluar 10, gula keluar 5"), stock("REDUCE_STOCK", ["beras", 10], ["gula", 5]));
+  assert.equal(parseRuleIntent("beras keluar 10, gula masuk 5").intent, "UNKNOWN");
 });
 
-test("a bare stock command opens its prompt; a reply to the prompt is read as that command", () => {
+test("a bare stock command carries no items (the product-first flow takes over)", () => {
   for (const [input, intent] of [["barang masuk", "ADD_STOCK"], ["tambah stok", "ADD_STOCK"], ["keluar", "REDUCE_STOCK"], ["koreksi stok", "SET_STOCK"]] as const) {
     assert.deepEqual(parseRuleIntent(input), stock(intent), input);
   }
-  assert.deepEqual(parseStockReply("REDUCE_STOCK", "beras 10, minyak 5"), stock("REDUCE_STOCK", ["beras", 10], ["minyak", 5]));
-  assert.deepEqual(parseStockReply("SET_STOCK", "minyak jadi 50"), stock("SET_STOCK", ["minyak", 50]));
-  // A full command typed as the reply keeps its own meaning.
-  assert.deepEqual(parseStockReply("REDUCE_STOCK", "tambah stok beras 5"), stock("ADD_STOCK", ["beras", 5]));
-  assert.equal(parseStockReply("ADD_STOCK", "batal").intent, "CANCEL");
+});
+
+test("the Update Stok quantity accepts a plain number only", () => {
+  for (const [input, expected] of [["20", 20], ["5", 5], ["1,5", 1.5], ["1.5", 1.5], ["1.500", 1500], [" 150 ", 150], ["0", 0]] as const) {
+    assert.equal(parseQuantityInput(input), expected, input);
+  }
+  for (const input of ["20 kg", "dua puluh", "beras 20", "beras medium 20 kg", "-5", "+5", "", "1.2.3", "20,"]) {
+    assert.equal(parseQuantityInput(input), null, input);
+  }
 });
 
 test("invalid quantities stay visible for validation instead of becoming a search", () => {
@@ -140,38 +147,16 @@ test("natural check-stock phrasing, including 'stock' spelling and 'ada berapa'"
 test("menu labels and commands map to their flows", () => {
   const cases: [string, string][] = [
     ["/start", "START"], ["/menu", "START"], ["menu", "START"], ["/help@stok_bot", "HELP"], ["❓ Bantuan", "HELP"],
-    ["📝 Update Stok", "UPDATE_STOCK"], ["⚠️ Stok Menipis", "LOW_STOCK"], ["🛒 Buat Pesanan", "CREATE_ORDER"], ["pesan", "CREATE_ORDER"],
+    ["📝 Update Stok", "UPDATE_STOCK"], ["⚠️ Stok Menipis", "LOW_STOCK"], ["📞 Hubungi Supplier", "CONTACT_SUPPLIER"],
+    ["lihat supplier", "LIST_SUPPLIERS"], ["📊 Laporan", "REPORT"],
   ];
   for (const [input, intent] of cases) assert.equal(parseRuleIntent(input).intent, intent, input);
 });
 
-test("orders parse one or more items; the last number is the quantity", () => {
-  const items = (input: string) => (parseRuleIntent(input) as { items?: unknown }).items;
-  assert.deepEqual(parseRuleIntent("pesan beras premium 50 kg"), { intent: "CREATE_ORDER", product_query: null, quantity: null, items: [{ product_query: "beras premium", quantity: 50 }] });
-  assert.deepEqual(items("pesan minyak goreng 20, gula pasir 30 dan beras 5"), [
-    { product_query: "minyak goreng", quantity: 20 }, { product_query: "gula pasir", quantity: 30 }, { product_query: "beras", quantity: 5 },
-  ]);
-  assert.deepEqual(items("pesan aqua 600 ml 10"), [{ product_query: "aqua 600 ml", quantity: 10 }]);
-  // Incomplete orders open the order guide instead of searching for "pesan ...".
-  for (const input of ["pesan minyak", "pesan minyak 0", "pesan 20"]) {
-    assert.deepEqual(parseRuleIntent(input), { intent: "CREATE_ORDER", product_query: null, quantity: null }, input);
+test("ordering phrases open the supplier directory; no order is parsed", () => {
+  for (const input of ["🛒 Buat Pesanan", "buat pesanan", "pesan", "pesan minyak 20", "butuh minyak 20 botol dan gula 30 kg", "order gula 5"]) {
+    assert.deepEqual(parseRuleIntent(input), { intent: "CONTACT_SUPPLIER", product_query: null, quantity: null }, input);
   }
-});
-
-test("supplier contact: menu, supplier list, and 'butuh …' requests", () => {
-  assert.equal(parseRuleIntent("📞 Hubungi Supplier").intent, "CONTACT_SUPPLIER");
-  assert.equal(parseRuleIntent("lihat supplier").intent, "LIST_SUPPLIERS");
-  assert.deepEqual(parseRuleIntent("butuh minyak 20 botol dan gula 30 kg"), {
-    intent: "CREATE_ORDER", product_query: null, quantity: null,
-    items: [{ product_query: "minyak", quantity: 20 }, { product_query: "gula", quantity: 30 }],
-  });
-  assert.deepEqual(parseOrderReply("minyak goreng 20, gula 30"), {
-    intent: "CREATE_ORDER", product_query: null, quantity: null,
-    items: [{ product_query: "minyak goreng", quantity: 20 }, { product_query: "gula", quantity: 30 }],
-  });
-  assert.deepEqual(parseOrderReply("minyak goreng"), { intent: "CREATE_ORDER", product_query: null, quantity: null });
-  assert.equal(parseOrderReply("batal").intent, "CANCEL");
-  assert.equal(parseRuleIntent("📊 Laporan").intent, "REPORT");
 });
 
 test("empty, unsupported commands, incomplete requests, and conversation are UNKNOWN", () => {

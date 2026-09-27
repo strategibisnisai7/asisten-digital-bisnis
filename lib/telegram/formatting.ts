@@ -1,9 +1,9 @@
 // Telegram presentation layer: every user-facing text and button is built here.
-// Business modules return data; this module turns it into plain-text messages.
-// Plain text (no parse_mode) keeps sheet content from injecting Markdown/HTML.
+// Business modules return data; this module turns it into plain-text messages. The
+// transport escapes every message and adds the shared footer (see footer.ts).
 import { getAppConfig } from "../config/app";
 import { stockLevel, type InventoryProduct, type InventoryResult, type StockLevel } from "../inventory/inventory-engine";
-import type { Supplier, SupplierGroup, SupplierRequest } from "../supplier/supplier-service";
+import { supplierKey, type Supplier } from "../supplier/supplier-service";
 import { whatsappLink } from "../supplier/whatsapp";
 import {
   MAX_STOCK_QUANTITY, MAX_TRANSACTION_ITEMS,
@@ -12,7 +12,8 @@ import {
 import type { StockChangeIntent, StockItemRequest } from "../parser/intents";
 import { STOCK_COMMAND_WORDS } from "../parser/rule-parser";
 import {
-  callbackData, menuButton, productButton, resolveButton, sealStockSummary, searchHeader, STOCK_REQUEST_LABEL,
+  callbackData, menuButton, productButton, resolveButton, sealMessage, searchHeader, STOCK_REQUEST_LABEL, supplierButton,
+  updateActionButton, updateDetailButton, updatePickButton, updateResultsButton, type UpdateScope,
 } from "./callbacks";
 import type { InlineButton, ReplyKeyboard, TelegramReply, UrlButton } from "./types";
 
@@ -109,7 +110,7 @@ export const HELP_EXAMPLES = [
   ["⚠️", "barang apa yang hampir habis?"],
   ["📋", "cari BRG0006"],
   ["📝", "tambah stok minyak 20, gula 30"],
-  ["📞", "butuh minyak goreng 20"],
+  ["📞", "hubungi supplier"],
 ] as const;
 
 export function helpReply(): TelegramReply {
@@ -150,15 +151,6 @@ export function searchPromptReply(): TelegramReply {
   ));
 }
 
-export function updateStockMenuReply(): TelegramReply {
-  return inlineReply(text("📝 Update Stok", "", "Pilih jenis perubahan:"), [
-    [menuButton(STOCK_PROMPTS.ADD_STOCK.title, "stock_in")],
-    [menuButton(STOCK_PROMPTS.REDUCE_STOCK.title, "stock_out")],
-    [menuButton(STOCK_PROMPTS.SET_STOCK.title, "stock_fix")],
-    [menuButton("⬅️ Kembali", "menu")],
-  ]);
-}
-
 // ---------------------------------------------------------------- report
 
 export function reportProgressReply(): TelegramReply {
@@ -178,130 +170,39 @@ export function reportErrorReply(): TelegramReply {
   return menuReply("Maaf, laporan belum dapat dibuat saat ini.\nSilakan coba beberapa saat lagi.");
 }
 
-// ---------------------------------------------------------------- contacting suppliers
+// ---------------------------------------------------------------- supplier directory
 
-const SUPPLIER_ORDER_PROMPT = { title: "📦 Pesan Barang", ask: "Ketik barang dan jumlah yang dibutuhkan." };
-
-export function supplierMenuReply(): TelegramReply {
-  return inlineReply("📞 Hubungi Supplier", [
-    [menuButton("📦 Pesan Barang", "supplier_order")],
-    [menuButton("📋 Lihat Supplier", "supplier_list")],
-    [menuButton("🔎 Cari Barang", "search")],
-    [menuButton("⬅️ Kembali", "menu")],
-  ]);
-}
-
-/** Asks what is needed; the reply box opens on this message so the answer keeps its context. */
-export function supplierOrderPromptReply(): TelegramReply {
-  return {
-    text: text(
-      SUPPLIER_ORDER_PROMPT.title,
-      "",
-      SUPPLIER_ORDER_PROMPT.ask,
-      "Bisa beberapa barang sekaligus, pisahkan dengan koma.",
-      "",
-      "Contoh:",
-      "minyak goreng 20, gula 30",
-    ),
-    reply_markup: { force_reply: true, input_field_placeholder: "minyak goreng 20, gula 30" },
-  };
-}
-
-export function isSupplierOrderPrompt(message: string | undefined): boolean {
-  const lines = message?.split("\n").map((line) => line.trim()) ?? [];
-  return lines[0] === SUPPLIER_ORDER_PROMPT.title && lines[2] === SUPPLIER_ORDER_PROMPT.ask;
-}
-
-function requestLines(group: SupplierGroup): string[] {
-  return group.lines.map((line) => `• ${compact(line.product.name, 100)} — ${amount(line.quantity, line.product.unit)}`);
-}
-
-/** The message the user sends on WhatsApp; nothing is sent automatically. */
-export function supplierMessage(group: SupplierGroup): string {
-  const { companyName } = getAppConfig();
-  return text(
-    group.supplierName ? `Halo ${group.supplierName},` : "Halo,",
-    "",
-    `Kami dari ${companyName} ingin memesan:`,
-    ...requestLines(group),
-    "",
-    "Mohon informasi ketersediaan dan harganya. Terima kasih.",
-  );
-}
-
-export function supplierRequestReply(request: SupplierRequest): TelegramReply {
-  if (request.status === "NOT_FOUND") {
-    return menuReply(text(
-      SUPPLIER_ORDER_PROMPT.title,
-      "",
-      "Saya belum menemukan barang dengan nama:",
-      `"${compact(request.query, 200)}"`,
-      "",
-      "Periksa kembali nama barang atau SKU-nya.",
-    ));
-  }
-  if (request.status === "AMBIGUOUS") {
-    const shown = request.products.slice(0, PAGE_SIZE);
-    return menuReply(text(
-      SUPPLIER_ORDER_PROMPT.title,
-      "",
-      `Ada ${request.products.length} barang yang cocok dengan "${compact(request.query, 100)}":`,
-      ...shown.map((product) => `• ${compact(product.name, 100)}`),
-      request.products.length > shown.length && `• dan ${request.products.length - shown.length} lainnya`,
-      "",
-      "Tulis nama barang yang lebih lengkap, misalnya:",
-      `"butuh ${compact(shown[0].name, 100)} ${number(request.quantity)}"`,
-    ));
-  }
-
-  const single = request.groups.length === 1;
-  const body = text(
-    "📋 Kebutuhan Barang",
-    ...request.groups.flatMap((group) => [
-      "",
-      compact(group.supplierName || "Supplier belum ditentukan", 100),
-      "",
-      ...requestLines(group),
-      !group.supplier?.whatsapp && "Kontak WhatsApp belum tersedia.",
-    ]),
-    "",
-    "Hubungi supplier melalui WhatsApp?",
-  );
-  // Tapping a WhatsApp button opens a prefilled chat; the user still presses send.
-  const rows: (InlineButton | UrlButton)[][] = request.groups.map((group) => [{
-    text: group.supplier?.whatsapp
-      ? (single ? "💬 WhatsApp Supplier" : `💬 WhatsApp ${compact(group.supplierName, 40)}`)
-      : `💬 Bagikan via WhatsApp${single ? "" : ` (${compact(group.supplierName || "tanpa supplier", 30)})`}`,
-    url: whatsappLink(group.supplier?.whatsapp ?? null, supplierMessage(group)),
-  }]);
-  rows.push([menuButton("❌ Batal", "supplier_cancel")]);
-  return inlineReply(body, rows);
-}
-
-export function supplierCancelledReply(): TelegramReply {
-  return menuReply(text("❌ Dibatalkan.", "", "Tidak ada pesan yang dikirim ke supplier."));
-}
-
+/** The supplier list; each supplier opens its own detail. Read-only. */
 export function supplierListReply(suppliers: readonly Supplier[]): TelegramReply {
-  if (!suppliers.length) return menuReply(text("📋 Daftar Supplier", "", "Belum ada data supplier."));
-  const shown = suppliers.slice(0, 30);
-  const body = text(
-    "📋 Daftar Supplier",
-    ...shown.flatMap((supplier) => [
-      "",
-      `🏢 ${compact(supplier.name, 80)}`,
-      supplier.city && `Kota: ${compact(supplier.city, 60)}`,
-      `Kontak: ${supplier.contact ? compact(supplier.contact, 40) : "-"}`,
-      supplier.note && `Keterangan: ${compact(supplier.note, 120)}`,
-      !supplier.whatsapp && "Kontak WhatsApp belum tersedia.",
-    ]),
-    suppliers.length > shown.length && `\ndan ${suppliers.length - shown.length} supplier lainnya.`,
-  );
-  const rows: (InlineButton | UrlButton)[][] = shown
-    .filter((supplier) => supplier.whatsapp)
-    .map((supplier) => [{ text: `💬 WhatsApp ${compact(supplier.name, 40)}`, url: `https://wa.me/${supplier.whatsapp}` }]);
+  if (!suppliers.length) return menuReply(text("📞 Hubungi Supplier", "", "Belum ada data supplier."));
+  const shown = suppliers.slice(0, 40);
+  const rows: InlineButton[][] = shown.map((supplier, index) => [supplierButton(`🏢 ${compact(supplier.name, 50)}`, supplierKey(supplier, index))]);
+  rows.push([menuButton("⬅️ Kembali", "menu")]);
+  return inlineReply(text(
+    "📞 Hubungi Supplier",
+    "",
+    "Pilih supplier:",
+    suppliers.length > shown.length && `Menampilkan ${shown.length} dari ${suppliers.length} supplier.`,
+  ), rows);
+}
+
+export function supplierDetailReply(supplier: Supplier): TelegramReply {
+  const rows: (InlineButton | UrlButton)[][] = [];
+  if (supplier.whatsapp) rows.push([{ text: "💬 Hubungi via WhatsApp", url: whatsappLink(supplier.whatsapp) }]);
   rows.push([menuButton("⬅️ Kembali", "supplier")]);
-  return inlineReply(body, rows);
+  return inlineReply(text(
+    `🏢 ${compact(supplier.name, 100)}`,
+    "",
+    `Kota: ${supplier.city ? compact(supplier.city, 60) : "-"}`,
+    `Kontak: ${supplier.contact ? compact(supplier.contact, 40) : "-"}`,
+    `Keterangan: ${supplier.note ? compact(supplier.note, 160) : "-"}`,
+    !supplier.whatsapp && "",
+    !supplier.whatsapp && "Kontak WhatsApp belum tersedia.",
+  ), rows);
+}
+
+export function supplierNotFoundReply(): TelegramReply {
+  return inlineReply(text("Supplier tidak ditemukan.", "", "Silakan pilih dari daftar supplier."), [[menuButton("📞 Hubungi Supplier", "supplier")]]);
 }
 
 // ---------------------------------------------------------------- conversation and errors
@@ -347,7 +248,11 @@ export function errorReply(): TelegramReply {
 
 /** Full detail after the user picks a product: the stock amount leads. */
 export function productDetailReply(product: InventoryProduct): TelegramReply {
-  return menuReply(text(
+  return menuReply(text(...productDetailLines(product)));
+}
+
+function productDetailLines(product: InventoryProduct): string[] {
+  return [
     `📦 ${compact(product.name, 240)}`,
     "",
     "Stok saat ini",
@@ -362,7 +267,7 @@ export function productDetailReply(product: InventoryProduct): TelegramReply {
     "SKU",
     compact(product.sku, 240),
     ...(product.supplier.trim() ? ["", "Supplier", compact(product.supplier)] : []),
-  ));
+  ];
 }
 
 /** A search with exactly one match skips the choice step. */
@@ -453,7 +358,7 @@ export function formatInventoryResult(result: InventoryResult, context: FormatCo
     case "INVALID_QUERY":
       return result.intent === "CHECK_STOCK" ? checkStockPromptReply() : searchPromptReply();
     case "UNSUPPORTED_INTENT":
-      return updateStockMenuReply();
+      return updateSearchPromptReply();
     case "MULTIPLE_MATCHES":
       return productChoiceReply(result.products, context);
   }
@@ -466,35 +371,166 @@ export function formatInventoryResult(result: InventoryResult, context: FormatCo
 
 // ---------------------------------------------------------------- stock updates
 
-const STOCK_PROMPTS: Record<StockChangeIntent, { title: string; ask: string; example: string; done: string }> = {
-  ADD_STOCK: { title: "📥 Barang Masuk", ask: "Ketik barang dan jumlah yang masuk.", example: "minyak 20, gula 30, beras 50", done: "minyak 20" },
-  REDUCE_STOCK: { title: "📤 Barang Keluar", ask: "Ketik barang dan jumlah yang keluar.", example: "beras 10, minyak 5", done: "minyak 5" },
-  SET_STOCK: { title: "🔄 Koreksi Stok", ask: "Ketik barang dan stok akhir yang benar.", example: "minyak jadi 50, gula jadi 20", done: "minyak jadi 50" },
+const STOCK_TITLES: Record<StockChangeIntent, string> = {
+  ADD_STOCK: "📥 Barang Masuk",
+  REDUCE_STOCK: "📤 Barang Keluar",
+  SET_STOCK: "🔄 Koreksi Stok",
 };
-// The line that tells a confirmation summary apart from the prompt with the same title.
-const SUMMARY_INTRO = "Berikut perubahan stok:";
-const STOCK_INTENTS = Object.keys(STOCK_PROMPTS) as StockChangeIntent[];
-
-/** Asks for an item list; the reply box opens on this message so the answer keeps its context. */
-export function stockPromptReply(intent: StockChangeIntent): TelegramReply {
-  const prompt = STOCK_PROMPTS[intent];
-  return {
-    text: text(prompt.title, "", prompt.ask, "Bisa beberapa barang sekaligus, pisahkan dengan koma.", "", "Contoh:", prompt.example),
-    reply_markup: { force_reply: true, input_field_placeholder: prompt.example.slice(0, 64) },
-  };
-}
-
-/** Which stock prompt a replied-to message is, if any. */
-export function stockPromptIntent(message: string | undefined): StockChangeIntent | null {
-  const lines = message?.split("\n").map((line) => line.trim()) ?? [];
-  return STOCK_INTENTS.find((intent) => STOCK_PROMPTS[intent].title === lines[0] && STOCK_PROMPTS[intent].ask === lines[2]) ?? null;
-}
+const STOCK_INTENTS = Object.keys(STOCK_TITLES) as StockChangeIntent[];
+// Examples for free-text commands.
+const FREE_TEXT_EXAMPLES: Record<StockChangeIntent, string> = { ADD_STOCK: "minyak 20", REDUCE_STOCK: "minyak 5", SET_STOCK: "minyak jadi 50" };
 
 function signedAmount(intent: StockChangeIntent, change: Pick<PlannedChange, "quantity" | "unit" | "merged">): string {
   const base = intent === "SET_STOCK" ? `jadi ${amount(change.quantity, change.unit)}`
     : `${intent === "ADD_STOCK" ? "+" : "-"}${amount(change.quantity, change.unit)}`;
   return change.merged.length ? `${base} (${change.merged.map(number).join(" + ")})` : base;
 }
+
+function delta(value: number, unit: string): string {
+  return `${value > 0 ? "+" : value < 0 ? "-" : ""}${amount(Math.abs(value), unit)}`;
+}
+
+// ---- product-first flow (📝 Update Stok): search → product → action → number → preview
+
+const UPDATE_SEARCH = { title: "📝 Update Stok", ask: "🔎 Cari barang yang ingin diperbarui." };
+
+/** Asks only for a search term; the reply box opens on this message. */
+export function updateSearchPromptReply(): TelegramReply {
+  return {
+    text: text(UPDATE_SEARCH.title, "", UPDATE_SEARCH.ask, "", "Ketik nama barang atau SKU.", "", "Contoh:", "beras"),
+    reply_markup: { force_reply: true, input_field_placeholder: "Nama barang atau SKU" },
+  };
+}
+
+export function isUpdateSearchPrompt(message: string | undefined): boolean {
+  const lines = message?.split("\n").map((line) => line.trim()) ?? [];
+  return lines[0] === UPDATE_SEARCH.title && lines[2] === UPDATE_SEARCH.ask;
+}
+
+export function updateResultsReply(products: readonly InventoryProduct[], query: string, scope: UpdateScope): TelegramReply {
+  const shown = products.slice(0, PAGE_SIZE);
+  const rows = shown
+    .map((product) => updatePickButton(`📦 ${compact(product.name, 60)}`, product.sku, scope))
+    .filter((button): button is InlineButton => button !== null)
+    .map((button) => [button]);
+  rows.push([menuButton("🔎 Cari Lagi", "upd_search")]);
+  return inlineReply(text(
+    searchHeader(products.length, query),
+    "",
+    "Silakan pilih:",
+    products.length > shown.length && `Menampilkan ${shown.length} dari ${products.length} barang. Ketik kata kunci yang lebih spesifik untuk mempersempit.`,
+  ), rows);
+}
+
+export function updateNotFoundReply(query: string): TelegramReply {
+  return inlineReply(text(
+    "⚠️ Barang tidak ditemukan",
+    "",
+    "Saya belum menemukan barang dengan nama:",
+    `"${compact(query, 200)}"`,
+    "",
+    "Silakan coba kata kunci lain.",
+  ), [[menuButton("🔎 Cari Lagi", "upd_search")], [menuButton("⬅️ Kembali", "menu")]]);
+}
+
+/** The selected product with the three change types; the SKU travels in the buttons. */
+export function updateProductReply(product: InventoryProduct, query: string | null, scope: UpdateScope): TelegramReply {
+  const rows: InlineButton[][] = STOCK_INTENTS
+    .map((intent) => updateActionButton(STOCK_TITLES[intent], intent, product.sku, scope))
+    .filter((button): button is InlineButton => button !== null)
+    .map((button) => [button]);
+  rows.push([query ? updateResultsButton("⬅️ Kembali", query, scope) : menuButton("⬅️ Kembali", "upd_search")]);
+  return inlineReply(text(...productDetailLines(product), "", "Apa yang ingin dilakukan?"), rows);
+}
+
+/** Replaces the action buttons while the quantity is being typed. */
+export function quantityWaitingKeyboard(sku: string, scope: UpdateScope): InlineButton[][] {
+  const cancel = updateDetailButton("❌ Batal", sku, scope);
+  return cancel ? [[cancel]] : [];
+}
+
+const QUANTITY_ASK: Record<StockChangeIntent, { ask: string; example: string }> = {
+  ADD_STOCK: { ask: "Masukkan jumlah barang yang masuk.", example: "20" },
+  REDUCE_STOCK: { ask: "Masukkan jumlah barang yang keluar.", example: "10" },
+  SET_STOCK: { ask: "Masukkan jumlah stok yang benar.", example: "150" },
+};
+
+/**
+ * Asks for a number only. The prompt is sealed with the action, the SKU, the chat,
+ * and the user, so the typed reply is read as a quantity for this product and never
+ * as a product name. `warning` lines explain why a previous number was refused.
+ */
+export function quantityPromptReply(intent: StockChangeIntent, product: InventoryProduct, scope: UpdateScope, now: number, warning: string[] = []): TelegramReply {
+  const { ask, example } = QUANTITY_ASK[intent];
+  const body = text(
+    ...(warning.length ? [...warning, ""] : []),
+    STOCK_TITLES[intent],
+    "",
+    `📦 ${compact(product.name, 100)}`,
+    `SKU: ${product.sku}`,
+    `Stok saat ini: ${amount(product.currentStock, product.unit)}`,
+    "",
+    ask,
+    "Contoh:",
+    example,
+    "",
+    "Ketik \"batal\" untuk kembali.",
+  );
+  return { text: sealMessage("QTY", body, scope, now), reply_markup: { force_reply: true, input_field_placeholder: `Contoh: ${example}` } };
+}
+
+/** Reads the action and SKU back from a sealed quantity prompt. */
+export function parseQuantityPrompt(body: string): { intent: StockChangeIntent; sku: string } | null {
+  const lines = body.split("\n").map((line) => line.trim());
+  const intent = STOCK_INTENTS.find((candidate) => lines.includes(STOCK_TITLES[candidate]));
+  const sku = lines.find((line) => line.startsWith("SKU: "))?.slice(5);
+  return intent && sku ? { intent, sku } : null;
+}
+
+export const QUANTITY_WARNINGS = {
+  invalid: ["⚠️ Jumlah tidak valid", "", "Masukkan jumlah dalam angka."],
+  wholeNumber: (unit: string) => ["⚠️ Jumlah tidak valid", "", `Satuan ${compact(unit, 20)} harus berupa bilangan bulat.`],
+  positive: ["⚠️ Jumlah tidak valid", "", "Jumlah harus lebih dari 0."],
+  tooLarge: ["⚠️ Jumlah tidak valid", "", `Jumlah maksimal ${number(MAX_STOCK_QUANTITY)}.`],
+  insufficient: (product: InventoryProduct) => [
+    "⚠️ Stok tidak mencukupi", "", "Stok saat ini:", amount(product.currentStock, product.unit), "", "Jumlah barang keluar tidak boleh melebihi stok.",
+  ],
+  unchanged: (product: InventoryProduct) => ["⚠️ Stok tidak berubah", "", `Stok saat ini sudah ${amount(product.currentStock, product.unit)}. Masukkan jumlah yang berbeda.`],
+};
+
+const CONFIRM_TITLES: Record<StockChangeIntent, string> = {
+  ADD_STOCK: "📥 Konfirmasi Barang Masuk",
+  REDUCE_STOCK: "📤 Konfirmasi Barang Keluar",
+  SET_STOCK: "🔄 Konfirmasi Koreksi Stok",
+};
+
+function singlePreviewBody(intent: StockChangeIntent, change: PlannedChange): string {
+  const moved = change.after - change.before;
+  return text(
+    CONFIRM_TITLES[intent],
+    "",
+    `📦 ${compact(change.name, 100)}`,
+    `SKU: ${change.sku}`,
+    "",
+    `Stok saat ini : ${amount(change.before, change.unit)}`,
+    ...(intent === "SET_STOCK"
+      ? [`Stok baru     : ${amount(change.after, change.unit)}`, `Penyesuaian   : ${delta(moved, change.unit)}`]
+      : [`${intent === "ADD_STOCK" ? "Barang masuk" : "Barang keluar"} : ${delta(moved, change.unit)}`, `Stok setelah : ${amount(change.after, change.unit)}`]),
+  );
+}
+
+/** Sealed preview of one product's change; nothing is written until it is confirmed. */
+export function singlePreviewReply(intent: StockChangeIntent, change: PlannedChange, scope: UpdateScope, now: number): TelegramReply {
+  const rows: InlineButton[][] = [[menuButton("✅ Konfirmasi", "stock_confirm")]];
+  const cancel = updateDetailButton("❌ Batal", change.sku, scope);
+  rows.push([cancel ?? menuButton("❌ Batal", "stock_cancel")]);
+  return inlineReply(sealMessage("UPD", singlePreviewBody(intent, change), scope, now), rows);
+}
+
+// ---- free-text commands ("tambah stok minyak 20, gula 30", "minyak masuk 20")
+
+// The line that marks a multi-item confirmation summary.
+const SUMMARY_INTRO = "Berikut perubahan stok:";
 
 const QUANTITY_PROBLEMS: Record<QuantityProblem, string> = {
   MISSING: "jumlah belum ditulis atau bukan angka",
@@ -522,7 +558,7 @@ export function stockRequestText(intent: StockChangeIntent, items: readonly Stoc
 
 function stockConfirmBody(intent: StockChangeIntent, changes: readonly PlannedChange[]): string {
   return text(
-    STOCK_PROMPTS[intent].title,
+    STOCK_TITLES[intent],
     "",
     SUMMARY_INTRO,
     ...changes.flatMap((change) => [
@@ -536,11 +572,12 @@ function stockConfirmBody(intent: StockChangeIntent, changes: readonly PlannedCh
   );
 }
 
-export function stockPlanReply(plan: StockPlan, context: FormatContext): TelegramReply {
-  const prompt = STOCK_PROMPTS[plan.intent];
+export function stockPlanReply(plan: StockPlan, context: FormatContext & { userId: number }): TelegramReply {
+  const scope = { chatId: context.chatId, userId: context.userId, secret: context.secret };
   switch (plan.status) {
     case "EMPTY":
-      return stockPromptReply(plan.intent);
+      // A command without items starts the product-first flow instead of asking for a list.
+      return updateSearchPromptReply();
     case "TOO_MANY_ITEMS":
       return menuReply(text(
         "⚠️ Terlalu banyak barang",
@@ -556,7 +593,7 @@ export function stockPlanReply(plan: StockPlan, context: FormatContext): Telegra
         ...plan.problems.map((problem) => `• "${compact(problem.query, 60)}" — ${QUANTITY_PROBLEMS[problem.problem]}`),
         "",
         "Contoh yang benar:",
-        `"${prompt.done}"`,
+        `"${FREE_TEXT_EXAMPLES[plan.intent]}"`,
       ));
     case "BLOCKED": {
       const onlyMissing = plan.lines.every((line) => line.ok || line.problem === "NOT_FOUND");
@@ -592,22 +629,42 @@ export function stockPlanReply(plan: StockPlan, context: FormatContext): Telegra
       ), rows);
     }
     case "READY":
-      return inlineReply(sealStockSummary(stockConfirmBody(plan.intent, plan.changes), context.chatId, context.secret, context.now), [
+      return inlineReply(sealMessage("UPD", stockConfirmBody(plan.intent, plan.changes), scope, context.now), [
         [menuButton("✅ Konfirmasi", "stock_confirm")],
         [menuButton("❌ Batal", "stock_cancel")],
       ]);
   }
 }
 
+// ---- reading a sealed summary back (single preview or multi-item summary)
+
 function parseNumber(value: string): number {
   const clean = value.replace(/−/g, "-").replace(/\./g, "").replace(",", ".");
   return /^-?\d+(?:\.\d+)?$/.test(clean) ? Number(clean) : Number.NaN;
 }
 
-/** Reads a confirmation summary produced by stockPlanReply back into changes. */
-export function parseStockSummary(body: string): { intent: StockChangeIntent; changes: (ConfirmedChange & { name: string })[] } | null {
+type ParsedSummary = { intent: StockChangeIntent; changes: (ConfirmedChange & { name: string })[] };
+
+function parseSinglePreview(lines: string[]): ParsedSummary | null {
+  const intent = STOCK_INTENTS.find((candidate) => CONFIRM_TITLES[candidate] === lines[0]);
+  if (!intent) return null;
+  const value = (label: RegExp) => {
+    const line = lines.find((entry) => label.test(entry));
+    return line ? parseNumber(line.replace(label, "").trim().split(" ")[0]) : Number.NaN;
+  };
+  const name = lines.find((line) => line.startsWith("📦 "))?.slice(3) ?? "";
+  const sku = lines.find((line) => line.startsWith("SKU: "))?.slice(5) ?? "";
+  const before = value(/^Stok saat ini\s*:/);
+  const after = value(intent === "SET_STOCK" ? /^Stok baru\s*:/ : /^Stok setelah\s*:/);
+  return sku && Number.isFinite(before) && Number.isFinite(after) ? { intent, changes: [{ name, sku, before, after }] } : null;
+}
+
+/** Reads a confirmation produced by singlePreviewReply or stockPlanReply back into changes. */
+export function parseStockSummary(body: string): ParsedSummary | null {
   const lines = body.split("\n").map((line) => line.trim());
-  const intent = STOCK_INTENTS.find((candidate) => STOCK_PROMPTS[candidate].title === lines[0]);
+  const single = parseSinglePreview(lines);
+  if (single) return single;
+  const intent = STOCK_INTENTS.find((candidate) => STOCK_TITLES[candidate] === lines[0]);
   if (!intent || lines[2] !== SUMMARY_INTRO) return null;
   const changes: (ConfirmedChange & { name: string })[] = [];
   let current: { name: string; sku: string } | null = null;
@@ -640,7 +697,7 @@ export function stockSummaryExpiredReply(): TelegramReply {
   return menuReply(text(
     "⌛ Ringkasan ini sudah kedaluwarsa",
     "",
-    "Konfirmasi berlaku 30 menit. Silakan kirim ulang perintah update agar stok terbaru dipakai.",
+    "Konfirmasi berlaku 30 menit. Silakan ulangi update agar stok terbaru dipakai.",
   ));
 }
 
@@ -658,9 +715,24 @@ function changeLines(changes: readonly AppliedChange[]): string[] {
   return changes.flatMap((change) => ["", `• ${compact(change.name, 100)}`, `  ${number(change.before)} → ${amount(change.after, change.unit)}`]);
 }
 
-export function stockApplyReply(result: ApplyResult): TelegramReply {
+const MOVE_LABELS: Record<StockChangeIntent, string> = { ADD_STOCK: "Barang masuk", REDUCE_STOCK: "Barang keluar", SET_STOCK: "Penyesuaian" };
+
+export function stockApplyReply(result: ApplyResult, intent?: StockChangeIntent): TelegramReply {
   switch (result.status) {
-    case "SAVED":
+    case "SAVED": {
+      const [only] = result.changes;
+      if (intent && result.changes.length === 1) {
+        return menuReply(text(
+          intent === "SET_STOCK" ? "✅ Stok berhasil dikoreksi" : "✅ Stok berhasil diperbarui",
+          "",
+          `📦 ${compact(only.name, 100)}`,
+          "",
+          `${amount(only.before, only.unit)} → ${amount(only.after, only.unit)}`,
+          `${MOVE_LABELS[intent]}: ${delta(only.after - only.before, only.unit)}`,
+          "",
+          `ID transaksi: ${result.transactionId}`,
+        ));
+      }
       return menuReply(text(
         "✅ Stok berhasil diperbarui",
         "",
@@ -668,8 +740,9 @@ export function stockApplyReply(result: ApplyResult): TelegramReply {
         ...changeLines(result.changes),
         "",
         "Semua perubahan berhasil disimpan.",
-        result.transactionId ? `ID transaksi: ${result.transactionId}` : "Catatan: riwayat transaksi belum tercatat.",
+        `ID transaksi: ${result.transactionId}`,
       ));
+    }
     case "UNVERIFIED":
       return menuReply(text(
         "⚠️ Perubahan sudah dikirim, tetapi perlu dicek",
@@ -690,13 +763,13 @@ export function stockApplyReply(result: ApplyResult): TelegramReply {
         ...result.changes.filter((change) => change.actual !== change.before).map((change) =>
           `• ${compact(change.name, 80)}: sekarang ${typeof change.actual === "number" ? amount(change.actual, change.unit) : "tidak ditemukan"} (di ringkasan ${number(change.before)})`),
         "",
-        "Kirim ulang perintah update agar ringkasan memakai stok terbaru.",
+        "Silakan ulangi update agar ringkasan memakai stok terbaru.",
       ));
     case "INVALID":
-      return menuReply(text("Ringkasan ini tidak dapat diproses.", "", "Silakan kirim ulang perintah update."));
+      return menuReply(text("Ringkasan ini tidak dapat diproses.", "", "Silakan ulangi update."));
     case "WRITE_FAILED":
       return result.outcome === "NOTHING_SAVED"
-        ? menuReply(text("❌ Update gagal disimpan", "", "Tidak ada perubahan stok yang tersimpan. Silakan coba lagi beberapa saat lagi."))
+        ? menuReply("⚠️ Stok belum berhasil diperbarui. Silakan coba lagi.")
         : menuReply(text("⚠️ Update belum dapat dipastikan", "", "Terjadi kendala saat menyimpan. Periksa stok barang terkait sebelum mencoba lagi."));
   }
 }

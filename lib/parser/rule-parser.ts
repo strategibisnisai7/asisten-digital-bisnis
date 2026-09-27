@@ -1,5 +1,5 @@
 import type {
-  OrderItemRequest, ProductReadIntent, SimpleIntent, StockChangeIntent, StockItemRequest, StructuredIntent,
+  ProductReadIntent, SimpleIntent, StockChangeIntent, StockItemRequest, StructuredIntent,
 } from "./intents";
 
 function simple(intent: SimpleIntent): StructuredIntent {
@@ -108,49 +108,28 @@ function signedStockList(text: string): StructuredIntent | null {
   return { intent, product_query: null, quantity: null, items: signed.map((match) => ({ product_query: match![1], quantity: parseAmount(match![3]) })) };
 }
 
-/**
- * Reads a reply to a stock prompt ("📥 Barang Masuk"): a bare list such as
- * "minyak 20, gula 30" is read as that command. A full command is kept as typed.
- */
-export function parseStockReply(intent: StockChangeIntent, input: string): StructuredIntent {
-  const direct = parseRuleIntent(input);
-  if (direct.intent === "CHECK_STOCK" || direct.intent === "SEARCH_PRODUCT" || direct.intent === "UNKNOWN") {
-    const text = normalize(input);
-    if (text) return stockCommand(intent, text);
-  }
-  return direct;
+// "minyak masuk 20" / "beras keluar 10, gula keluar 5": the verb follows the product.
+function verbAfterProduct(text: string): StructuredIntent | null {
+  const parts = text.split(LIST_SEPARATOR).filter(Boolean);
+  const matches = parts.map((part) => part.match(new RegExp(String.raw`^(.+?)\s+(masuk|keluar)\s+${AMOUNT}(?:\s*[a-z]{1,12})?$`)));
+  if (!parts.length || parts.length > MAX_LIST_ITEMS || matches.some((match) => !match || !isProductQuery(match[1]))) return null;
+  const verbs = new Set(matches.map((match) => match![2]));
+  if (verbs.size !== 1) return null;
+  const intent: StockChangeIntent = verbs.has("masuk") ? "ADD_STOCK" : "REDUCE_STOCK";
+  return { intent, product_query: null, quantity: null, items: matches.map((match) => ({ product_query: match![1], quantity: parseAmount(match![3]) })) };
 }
-
-// Asking a supplier for goods: "pesan minyak 20", "butuh minyak 20 botol dan gula 30 kg".
-const ORDER_PREFIX = /^(?:(?:buat|bikin)(?:kan)?\s+(?:pesanan|order)|pesan(?:kan)?(?:\s+barang)?|order|butuh|perlu|kebutuhan(?:\s+barang)?)(?:\s*:\s*|\s+)(.+)$/;
-const ORDER_PROMPT = /^(?:(?:buat|bikin)(?:kan)?\s+)?(?:pesanan|order)$|^(?:pesan(?:kan)?(?:\s+barang)?|butuh|perlu|kebutuhan(?:\s+barang)?)$/;
 
 /**
- * Reads a reply to the "Pesan Barang" prompt: a bare list such as
- * "minyak goreng 20, gula 30" is a supplier request.
+ * The quantity typed in the product-first Update Stok flow: a plain number only.
+ * "20", "1,5", and "1.500" (thousands) are accepted; "20 kg" or "beras 20" are not.
  */
-export function parseOrderReply(input: string): StructuredIntent {
-  const direct = parseRuleIntent(input);
-  if (direct.intent === "CREATE_ORDER" || direct.intent === "CANCEL" || direct.intent === "START" || direct.intent === "HELP") return direct;
-  const items = parseOrderItems(normalize(input));
-  return items ? { intent: "CREATE_ORDER", product_query: null, quantity: null, items } : simple("CREATE_ORDER");
+export function parseQuantityInput(input: string): number | null {
+  const text = input.normalize("NFKC").trim();
+  return /^\d+(?:[.,]\d+)*$/.test(text) && Number.isFinite(parseAmount(text)) ? parseAmount(text) : null;
 }
 
-// "minyak goreng 20, gula pasir 30 kg": the last number is the quantity and an optional
-// trailing unit word is accepted but not trusted; the sheet's unit is used instead.
-function parseOrderItems(list: string): OrderItemRequest[] | null {
-  const parts = list.split(LIST_SEPARATOR).filter(Boolean);
-  if (!parts.length || parts.length > 10) return null;
-  const items: OrderItemRequest[] = [];
-  for (const part of parts) {
-    const match = part.match(/^(.+?)\s+(\d+(?:[.,]\d+)?)(?:\s+[a-z]{1,12})?$/);
-    if (!match || !isProductQuery(match[1])) return null;
-    const quantity = Number(match[2].replace(",", "."));
-    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > Number.MAX_SAFE_INTEGER) return null;
-    items.push({ product_query: match[1], quantity });
-  }
-  return items;
-}
+// Supplier ordering is not offered; these phrases open the supplier directory instead.
+const SUPPLIER_PHRASE = /^(?:(?:buat|bikin)(?:kan)?\s+)?(?:pesanan|order)(?:\s.*)?$|^(?:pesan(?:kan)?|butuh|perlu|kebutuhan)(?:\s.*)?$/;
 
 function parsePhrase(text: string): StructuredIntent {
   if (/^(?:menu|menu utama|kembali|mulai)$/.test(text)) return simple("START");
@@ -161,14 +140,7 @@ function parsePhrase(text: string): StructuredIntent {
   if (/^(?:update|perbarui|ubah)\s+stok$/.test(text)) return simple("UPDATE_STOCK");
   if (/^(?:hubungi|kontak)\s+supplier$|^supplier$/.test(text)) return simple("CONTACT_SUPPLIER");
   if (/^(?:lihat|daftar)\s+supplier$/.test(text)) return simple("LIST_SUPPLIERS");
-  if (ORDER_PROMPT.test(text)) return simple("CREATE_ORDER");
-
-  const order = text.match(ORDER_PREFIX);
-  if (order) {
-    const items = parseOrderItems(order[1]);
-    // An incomplete order still opens the order guide instead of a product search.
-    return items ? { intent: "CREATE_ORDER", product_query: null, quantity: null, items } : simple("CREATE_ORDER");
-  }
+  if (SUPPLIER_PHRASE.test(text)) return simple("CONTACT_SUPPLIER");
 
   if (/^(?:(?:cek|lihat|cari|tampilkan)\s+)?(?:barang|produk|stok)(?:\s+apa)?(?:\s+yang)?(?:\s+stoknya)?\s+(?:hampir habis|menipis|habis|rendah|di bawah minimum)$/.test(text)) {
     return simple("LOW_STOCK");
@@ -178,7 +150,7 @@ function parsePhrase(text: string): StructuredIntent {
     const match = text.match(pattern);
     if (match) return stockCommand(intent, match[1].trim());
   }
-  const signed = signedStockList(text);
+  const signed = signedStockList(text) ?? verbAfterProduct(text);
   if (signed) return signed;
 
   // A bare command opens the matching prompt ("cek stok", "cari barang").

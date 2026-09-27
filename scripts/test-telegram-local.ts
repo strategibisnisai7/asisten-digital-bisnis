@@ -47,12 +47,11 @@ async function main() {
     ["barang apa yang hampir habis", /Stok Menipis|Semua stok aman/],
     ["bantuan", /^❓ Bantuan/],
     ["📋 Cari Barang", /^📋 Cari Barang/],
-    ["📝 Update Stok", /^📝 Update Stok/],
+    ["📝 Update Stok", /^📝 Update Stok\n\n🔎 Cari barang yang ingin diperbarui\./],
     // Summary built from real stock; nothing is confirmed or written.
     [`tambah stok ${source[0].sku} 1`, new RegExp(`^📥 Barang Masuk\\n\\nBerikut perubahan stok:\\n\\n• .+ · ${source[0].sku}\\n`)],
-    ["📞 Hubungi Supplier", /^📞 Hubungi Supplier$/],
-    ["lihat supplier", /^📋 Daftar Supplier/],
-    [`butuh ${source[0].sku} 5`, /^📋 Kebutuhan Barang/],
+    ["📞 Hubungi Supplier", /^📞 Hubungi Supplier\n\nPilih supplier:/],
+    ["lihat supplier", /^📞 Hubungi Supplier\n\nPilih supplier:/],
   ];
   for (const [text, expected] of flows) {
     const before = sent.length;
@@ -63,6 +62,11 @@ async function main() {
   }
   assert.ok(sent.every((reply) => reply.text.length > 0 && reply.text.length <= 4096));
   assert.doesNotMatch(sent.map((reply) => reply.text).join("\n"), /Buat Pesanan/);
+
+  // Product-first Update Stok on real data up to the quantity prompt; nothing is written.
+  const searchPrompt = sent.find((reply) => reply.text.startsWith("📝 Update Stok"))!;
+  await handler(request({ update_id: 80, message: { chat: { id: 42 }, from: { id: 42 }, text: source[0].sku, reply_to_message: { text: searchPrompt.text, from: { id: 1, is_bot: true } } } }));
+  assert.match(sent.at(-1)!.text, /Apa yang ingin dilakukan\?$/);
 
   // Report from real Stok and Riwayat Transaksi: progress, ready, and exactly one PDF.
   const reportStart = sent.length;

@@ -43,6 +43,11 @@ function toProduct(item: StokItem): StockProduct {
   return { sku: item.sku, name: item.namaBarang, unit: item.satuan, currentStock: item.stokAkhir };
 }
 
+/** Units counted in whole pieces reject decimals; weight and volume units accept them. */
+export function allowsDecimal(unit: string): boolean {
+  return /^(?:kg|kilo(?:gram)?|g|gr|gram|ons|l|ltr|liter|litre|ml|m|meter)$/i.test(unit.trim());
+}
+
 export function quantityProblem(intent: StockChangeIntent, quantity: number): QuantityProblem | null {
   if (!Number.isFinite(quantity)) return "MISSING";
   if (quantity < 0) return "NEGATIVE";

@@ -39,10 +39,10 @@ Jangan beri prefix `NEXT_PUBLIC_`. Jangan masukkan token dalam query URL aplikas
 Kirim `/start` untuk sambutan dan menu utama (keyboard persisten):
 
 - 🔍 Cek Stok / 📋 Cari Barang → meminta nama barang atau SKU, dengan contoh.
-- 📝 Update Stok → pilihan Barang Masuk, Barang Keluar, Koreksi Stok, dan Kembali (lihat "Update stok" di bawah).
+- 📝 Update Stok → cari barang, pilih barang, lalu pilih Barang Masuk / Barang Keluar / Koreksi Stok (lihat "Update stok").
 - 📊 Laporan → langsung membuat satu PDF laporan bulan berjalan (lihat "Laporan").
 - ⚠️ Stok Menipis → daftar barang di bawah minimum beserta stok dan minimumnya.
-- 📞 Hubungi Supplier → Pesan Barang, Lihat Supplier, Cari Barang, Kembali (lihat "Hubungi Supplier").
+- 📞 Hubungi Supplier → daftar supplier dan kontak WhatsApp (lihat "Hubungi Supplier").
 - ❓ Bantuan → contoh kalimat yang bisa langsung dicoba.
 
 Pengguna tetap bisa langsung mengetik tanpa memilih menu. Variasi seperti "cek stok", "cek stock", "lihat stok", "stok minyak", "berapa stok minyak", "minyak tinggal berapa", dan "stok beras ada berapa" dipahami sebagai cek stok. Perintah tanpa nama barang membuka prompt yang sesuai.
@@ -62,13 +62,26 @@ Error teknis (Google API, jaringan) hanya dicatat di server log dalam bentuk yan
 
 ## Update stok
 
-Contoh perintah (maksimal 20 barang per pesan; pisahkan dengan koma, titik koma, "dan", atau baris baru):
+### Menu 📝 Update Stok (product-first, satu barang per alur)
 
-- Barang masuk: `tambah stok minyak 20, gula 30`, `minyak +20, gula +30`, `barang masuk: minyak 20, gula 30`
-- Barang keluar: `keluar beras 10, minyak 5`, `minyak -5, gula -2`
+Search → pilih barang → detail barang → pilih 📥 Barang Masuk / 📤 Barang Keluar / 🔄 Koreksi Stok → ketik angka → preview → ✅ Konfirmasi → write + riwayat. Tidak ada jalan pintas yang melewati pemilihan barang, termasuk Koreksi Stok, dan bot tidak pernah meminta "nama barang + jumlah" dalam satu input.
+
+- Menu meminta kata pencarian (kotak balasan). Hasil ditampilkan sebagai tombol nama barang; satu hasil langsung membuka detail; tanpa hasil ada 🔎 Cari Lagi / ⬅️ Kembali.
+- Detail barang menampilkan stok, status, minimum, lokasi, SKU, supplier, dan tiga jenis perubahan. ⬅️ Kembali kembali ke hasil pencarian.
+- Setelah jenis perubahan dipilih, tombol detail diganti menjadi ❌ Batal dan bot mengirim prompt jumlah (kotak balasan). Balasan hanya dibaca sebagai angka (`20`, `1,5`, `1.500`); `20 kg` atau `beras 20` ditolak dengan "⚠️ Jumlah tidak valid". Desimal hanya untuk satuan berat/volume (kg, gram, liter, ml, …). Barang keluar melebihi stok ditolak dengan "⚠️ Stok tidak mencukupi". Koreksi meminta stok yang benar; penyesuaian = target − stok saat ini.
+- ❌ Batal (atau balas "batal") pada langkah jumlah dan pada preview kembali ke detail barang.
+
+State alur (`UPDATE_STOCK_*`) tidak disimpan di server: SKU dan jenis perubahan dibawa oleh tombol yang ditandatangani HMAC dan oleh prompt jumlah yang disegel (`Kode: QTY-…`), keduanya terikat ke chat **dan user** Telegram. Pengguna lain tidak dapat memakai tombol, prompt, atau preview milik pengguna lain. Preview disegel sebagai `Kode: UPD-…` dan tombolnya dihapus setelah dikonfirmasi atau dibatalkan.
+
+### Chat bebas (tetap tersedia, termasuk multi-barang)
+
+Contoh (maksimal 20 barang per pesan; pisahkan dengan koma, titik koma, "dan", atau baris baru):
+
+- Barang masuk: `tambah stok minyak 20, gula 30`, `minyak +20, gula +30`, `barang masuk: minyak 20, gula 30`, `minyak masuk 20`
+- Barang keluar: `keluar beras 10, minyak 5`, `minyak -5, gula -2`, `beras keluar 10`
 - Koreksi (stok akhir yang benar): `koreksi stok minyak jadi 50, gula jadi 20`
 
-Tombol 📥/📤/🔄 membuka prompt dengan kotak balasan (force reply); balasan berupa daftar saja (`minyak 20, gula 30`) dibaca sebagai jenis perubahan tersebut.
+Perintah tanpa barang (`barang masuk`, `koreksi stok`) membuka alur product-first di atas.
 
 Alur: Parser → resolusi produk (SKU persis, nama persis, lalu sebagian) → validasi → ringkasan → konfirmasi → write. Tidak ada write sebelum konfirmasi, dan tidak ada write jika ada barang yang tidak ditemukan, ambigu, jumlah tidak valid, stok menjadi negatif, atau koreksi tanpa perubahan. Barang ambigu memunculkan tombol nama produk; setelah dipilih, permintaan dilanjutkan. Barang yang ditulis dua kali digabung (koreksi dengan dua target berbeda ditolak).
 
@@ -82,10 +95,13 @@ Riwayat: satu baris per barang, satu ID per aksi (`TRX-001`, `TRX-002`, …), ta
 
 ## Hubungi Supplier
 
-Hanya membaca Sheets; tidak mengubah stok dan tidak membuat transaksi (`lib/supplier/supplier-service.ts`).
+Direktori supplier saja; hanya membaca tab `Supplier` (`lib/supplier/supplier-service.ts`) dan tidak mengubah stok. Tidak ada alur pesan barang/pesanan.
 
-- **Pesan Barang**: balas prompt dengan `minyak goreng 20, gula 30`, atau ketik `butuh minyak 20 botol dan gula 30 kg`. Barang di-resolve, supplier dicari lewat Kode Supplier di `Master Barang` → tab `Supplier` (cadangan: nama supplier di tab Stok), lalu dikelompokkan per supplier. Setiap supplier mendapat tombol WhatsApp berupa deep link `https://wa.me/<nomor>?text=<pesan>`; pengguna mengirim sendiri. Tanpa nomor, ditampilkan "Kontak WhatsApp belum tersedia." dan tombol berbagi tanpa nomor. WhatsApp API tidak dipakai.
-- **Lihat Supplier**: nama, kota, kontak, keterangan dari tab `Supplier`, dengan tombol WhatsApp bila nomor valid (dinormalisasi ke `62…`).
+📞 Hubungi Supplier → daftar supplier (tombol nama) → detail (nama, kota, kontak, keterangan) → [💬 Hubungi via WhatsApp] berupa `https://wa.me/<nomor>` (nomor dinormalisasi: `0812…`/`+62812…` → `62812…`). Tanpa nomor valid, tombol tidak ditampilkan dan tertulis "Kontak WhatsApp belum tersedia." WhatsApp API tidak dipakai dan tidak ada pesan yang dikirim otomatis. Frasa seperti "buat pesanan" atau "butuh …" membuka direktori ini.
+
+## Footer
+
+Setiap pesan bot diakhiri footer kecil: *File stok XLS: [Lihat File](https://tinyurl.com/faststock)*. Footer ditambahkan sekali oleh transport (`lib/telegram/footer.ts`), yang juga meng-escape seluruh isi pesan untuk `parse_mode: HTML`, sehingga isi dari Sheets tidak dapat menyisipkan markup. Saat Telegram mengembalikan teks pesan (callback/reply), footer dibuang sebelum diproses. URL dapat diganti dengan `STOCK_FILE_URL` (harus https).
 
 ## Laporan
 

@@ -4,7 +4,6 @@ export type SimpleIntent =
   | "START"
   | "LOW_STOCK"
   | "UPDATE_STOCK"
-  | "CREATE_ORDER"
   | "CANCEL"
   | "CONFIRM"
   | "HELP"
@@ -14,8 +13,6 @@ export type SimpleIntent =
   | "UNKNOWN";
 
 export type IntentType = ProductReadIntent | StockChangeIntent | SimpleIntent;
-
-export interface OrderItemRequest { product_query: string; quantity: number }
 
 /**
  * One requested stock change. The parser keeps whatever number was written
@@ -30,5 +27,4 @@ export type StructuredIntent =
   | { intent: "SEARCH_PRODUCT"; product_query: string; quantity: null }
   // An empty items list means the command was given without any item.
   | { intent: StockChangeIntent; product_query: null; quantity: null; items: StockItemRequest[] }
-  | { intent: "CREATE_ORDER"; product_query: null; quantity: null; items: OrderItemRequest[] }
   | { intent: SimpleIntent; product_query: null; quantity: null };

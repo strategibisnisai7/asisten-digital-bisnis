@@ -1,23 +1,28 @@
 import "server-only";
 import { createHmac } from "node:crypto";
+import type { StockChangeIntent } from "../parser/intents";
 import { equalSecret } from "./config";
 import type { InlineButton, TelegramEvent } from "./types";
 
 /** Static navigation buttons. They carry no data, so they need no signature. */
-export const MENU_ACTIONS = [
-  "menu", "check", "search", "update", "stock_in", "stock_out", "stock_fix", "stock_confirm", "stock_cancel",
-  "supplier", "supplier_order", "supplier_list", "supplier_cancel",
-] as const;
+export const MENU_ACTIONS = ["menu", "check", "search", "update", "upd_search", "stock_confirm", "stock_cancel", "supplier"] as const;
 export type MenuAction = typeof MENU_ACTIONS[number];
 
 export type CallbackAction =
   | { kind: "pick"; value: string; page: 0 }
   | { kind: "search" | "low"; value: string; page: number }
   | { kind: "menu"; value: MenuAction; page: 0 }
-  // Picks a product for item `page` of a pending stock request.
-  | { kind: "resolve"; value: string; page: number; request: string };
+  // Picks a product for item `page` of a pending free-text stock request.
+  | { kind: "resolve"; value: string; page: number; request: string }
+  // Product-first Update Stok flow, bound to the chat and the user who started it.
+  | { kind: "upd_pick"; sku: string }
+  | { kind: "upd_action"; sku: string; intent: StockChangeIntent }
+  | { kind: "upd_detail"; sku: string }
+  | { kind: "upd_results"; query: string }
+  // Supplier directory (read-only, public within the bot).
+  | { kind: "supplier"; code: string };
 
-type SignedAction = Exclude<CallbackAction, { kind: "menu" | "resolve" }>;
+type SignedAction = Extract<CallbackAction, { kind: "pick" | "search" | "low" }>;
 
 // Telegram limits callback_data to 64 bytes.
 const MAX_CALLBACK_BYTES = 64;
@@ -30,7 +35,7 @@ function sign(action: SignedAction, chatId: number, secret: string): string {
     .digest("base64url").slice(0, 22);
 }
 
-export function callbackData(action: Exclude<CallbackAction, { kind: "resolve" }>, chatId: number, secret: string): string {
+export function callbackData(action: SignedAction | Extract<CallbackAction, { kind: "menu" }>, chatId: number, secret: string): string {
   if (action.kind === "menu") return `m:${action.value}`;
   return `${action.kind}:${action.page}:${sign(action, chatId, secret)}`;
 }
@@ -59,17 +64,101 @@ export function searchHeader(count: number, query: string): string {
   return `🔎 Saya menemukan ${count} barang untuk "${query}".`;
 }
 
-function readSearchQuery(text: string): string {
+export function readSearchQuery(text: string): string {
   const firstLine = text.split("\n")[0];
   const match = firstLine.match(SEARCH_HEADER);
   if (match) return match[1];
   return firstLine.startsWith(LEGACY_SEARCH_PREFIX) ? firstLine.slice(LEGACY_SEARCH_PREFIX.length) : "";
 }
 
-// ---------------------------------------------------------------- stock updates
+export function supplierButton(label: string, code: string): InlineButton {
+  return { text: label, callback_data: `sp:${code}`.slice(0, MAX_CALLBACK_BYTES) };
+}
 
-// A pending stock request is written into the choice message after this label, so the
-// request can continue after a product is picked without any stored session.
+// ---------------------------------------------------------------- Update Stok (product-first)
+
+/**
+ * The flow's state lives in Telegram itself: each button carries the selected SKU
+ * (and action) signed together with the chat and user, so no server session is
+ * needed and one user cannot act on another user's buttons.
+ */
+const UPDATE_ACTION_CODES: Record<StockChangeIntent, string> = { ADD_STOCK: "i", REDUCE_STOCK: "o", SET_STOCK: "k" };
+const UPDATE_ACTIONS = Object.fromEntries(Object.entries(UPDATE_ACTION_CODES).map(([intent, code]) => [code, intent])) as Record<string, StockChangeIntent>;
+
+function updateSignature(chatId: number, userId: number, parts: readonly string[], secret: string): string {
+  return createHmac("sha256", secret).update(JSON.stringify([chatId, userId, "update", ...parts])).digest("base64url").slice(0, 16);
+}
+
+function fits(data: string): string | null {
+  return Buffer.byteLength(data) <= MAX_CALLBACK_BYTES ? data : null;
+}
+
+export interface UpdateScope { chatId: number; userId: number; secret: string }
+
+export function updatePickButton(label: string, sku: string, scope: UpdateScope): InlineButton | null {
+  const data = fits(`up:${updateSignature(scope.chatId, scope.userId, ["pick", sku], scope.secret)}:${sku}`);
+  return data ? { text: label, callback_data: data } : null;
+}
+
+export function updateActionButton(label: string, intent: StockChangeIntent, sku: string, scope: UpdateScope): InlineButton | null {
+  const code = UPDATE_ACTION_CODES[intent];
+  const data = fits(`ua:${code}:${updateSignature(scope.chatId, scope.userId, ["action", code, sku], scope.secret)}:${sku}`);
+  return data ? { text: label, callback_data: data } : null;
+}
+
+/** Back to the product detail (cancel on the quantity step or on the preview). */
+export function updateDetailButton(label: string, sku: string, scope: UpdateScope): InlineButton | null {
+  const data = fits(`ux:${updateSignature(scope.chatId, scope.userId, ["detail", sku], scope.secret)}:${sku}`);
+  return data ? { text: label, callback_data: data } : null;
+}
+
+/** Back to the search results; a query too long for callback_data returns to the search prompt. */
+export function updateResultsButton(label: string, query: string, scope: UpdateScope): InlineButton {
+  const data = fits(`ub:${updateSignature(scope.chatId, scope.userId, ["results", query], scope.secret)}:${query}`);
+  return { text: label, callback_data: data ?? "m:upd_search" };
+}
+
+// ---------------------------------------------------------------- sealed messages
+
+/**
+ * A sealed message carries its own pending state: the text lists what will happen
+ * and the last line holds the issue time and an HMAC over the chat, the user, and
+ * the text. Replies and buttons re-read that text instead of a server session.
+ * "UPD" seals a stock summary awaiting confirmation; "QTY" a quantity prompt.
+ */
+export type SealKind = "UPD" | "QTY";
+export const SEAL_TTL_MS = 30 * 60 * 1000;
+
+function canonical(text: string): string {
+  return text.split("\n").map((line) => line.trim()).join("\n").trim();
+}
+
+function sealSignature(kind: SealKind, body: string, issued: string, chatId: number, userId: number, secret: string): string {
+  return createHmac("sha256", secret).update(JSON.stringify([chatId, userId, kind, issued, canonical(body)])).digest("hex").slice(0, 12).toUpperCase();
+}
+
+export function sealMessage(kind: SealKind, body: string, scope: UpdateScope, now = Date.now()): string {
+  const issued = Math.floor(now / 1000).toString(36).toUpperCase();
+  return `${body}\n\nKode: ${kind}-${issued}-${sealSignature(kind, body, issued, scope.chatId, scope.userId, scope.secret)}`;
+}
+
+export type OpenedSeal = { status: "VALID"; body: string } | { status: "EXPIRED" } | { status: "INVALID" };
+
+export function openSealedMessage(kind: SealKind, text: string, scope: UpdateScope, now = Date.now()): OpenedSeal {
+  const lines = canonical(text).split("\n");
+  const match = lines.at(-1)?.match(/^Kode: (UPD|QTY)-([0-9A-Z]{1,10})-([0-9A-F]{12})$/);
+  if (!match || match[1] !== kind) return { status: "INVALID" };
+  const body = lines.slice(0, -1).join("\n");
+  if (!equalSecret(match[3], sealSignature(kind, body, match[2], scope.chatId, scope.userId, scope.secret))) return { status: "INVALID" };
+  const issuedMs = parseInt(match[2], 36) * 1000;
+  if (!Number.isFinite(issuedMs) || now - issuedMs > SEAL_TTL_MS || issuedMs - now > 60_000) return { status: "EXPIRED" };
+  return { status: "VALID", body };
+}
+
+// ---------------------------------------------------------------- free-text stock requests
+
+// A pending free-text request is written into the choice message after this label, so
+// the request can continue after a product is picked without any stored session.
 export const STOCK_REQUEST_LABEL = "Permintaan:";
 
 function readStockRequest(text: string): string {
@@ -89,44 +178,29 @@ export function resolveButton(label: string, request: string, index: number, sku
   return { text: label, callback_data: data };
 }
 
-/**
- * The stock summary is the pending transaction: its text lists SKU and before/after
- * values, and the last line carries a reference with the issue time and an HMAC over
- * the chat and the text. Confirming (button, or replying "ya") re-reads this text.
- */
-const SUMMARY_REF_PREFIX = "Kode: UPD-";
-export const STOCK_SUMMARY_TTL_MS = 30 * 60 * 1000;
-
-function canonical(text: string): string {
-  return text.split("\n").map((line) => line.trim()).join("\n").trim();
-}
-
-function summarySignature(body: string, issued: string, chatId: number, secret: string): string {
-  return createHmac("sha256", secret).update(JSON.stringify([chatId, "stock", issued, canonical(body)])).digest("hex").slice(0, 12).toUpperCase();
-}
-
-export function sealStockSummary(body: string, chatId: number, secret: string, now = Date.now()): string {
-  const issued = Math.floor(now / 1000).toString(36).toUpperCase();
-  return `${body}\n\n${SUMMARY_REF_PREFIX}${issued}-${summarySignature(body, issued, chatId, secret)}`;
-}
-
-export type OpenedSummary = { status: "VALID"; body: string } | { status: "EXPIRED" } | { status: "INVALID" };
-
-export function openStockSummary(text: string, chatId: number, secret: string, now = Date.now()): OpenedSummary {
-  const lines = canonical(text).split("\n");
-  const match = lines.at(-1)?.match(/^Kode: UPD-([0-9A-Z]{1,10})-([0-9A-F]{12})$/);
-  if (!match) return { status: "INVALID" };
-  const body = lines.slice(0, -1).join("\n");
-  if (!equalSecret(match[2], summarySignature(body, match[1], chatId, secret))) return { status: "INVALID" };
-  const issuedMs = parseInt(match[1], 36) * 1000;
-  if (!Number.isFinite(issuedMs) || now - issuedMs > STOCK_SUMMARY_TTL_MS || issuedMs - now > 60_000) return { status: "EXPIRED" };
-  return { status: "VALID", body };
-}
+// ---------------------------------------------------------------- reading callbacks
 
 export function readCallback(event: Extract<TelegramEvent, { kind: "callback" }>, secret: string): CallbackAction | null {
   const menu = event.data.match(/^m:([a-z_]{1,20})$/);
   if (menu) {
     return (MENU_ACTIONS as readonly string[]).includes(menu[1]) ? { kind: "menu", value: menu[1] as MenuAction, page: 0 } : null;
+  }
+
+  const supplier = event.data.match(/^sp:(.{1,60})$/);
+  if (supplier) return { kind: "supplier", code: supplier[1] };
+
+  const update = event.data.match(/^(up|ux|ub):([A-Za-z0-9_-]{16}):(.+)$/) ?? event.data.match(/^(ua):([iok]):([A-Za-z0-9_-]{16}):(.+)$/);
+  if (update) {
+    const valid = (parts: string[], signature: string) =>
+      equalSecret(signature, updateSignature(event.chatId, event.userId, parts, secret));
+    if (update[1] === "ua") {
+      const [, , code, signature, sku] = update;
+      return valid(["action", code, sku], signature) ? { kind: "upd_action", sku, intent: UPDATE_ACTIONS[code] } : null;
+    }
+    const [, prefix, signature, value] = update;
+    if (prefix === "up") return valid(["pick", value], signature) ? { kind: "upd_pick", sku: value } : null;
+    if (prefix === "ux") return valid(["detail", value], signature) ? { kind: "upd_detail", sku: value } : null;
+    return valid(["results", value], signature) ? { kind: "upd_results", query: value } : null;
   }
 
   const resolve = event.data.match(/^rs:(\d{1,2}):([A-Za-z0-9_-]{22}):(.+)$/);

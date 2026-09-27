@@ -1,5 +1,6 @@
 import "server-only";
 import { getTelegramToken, TelegramError } from "./config";
+import { visibleLength, withFooter } from "./footer";
 import type { TelegramBot } from "./types";
 
 type Method = "sendMessage" | "answerCallbackQuery" | "editMessageReplyMarkup" | "sendDocument";
@@ -28,8 +29,11 @@ export function createTelegramBot(fetcher: typeof fetch = fetch): TelegramBot {
   }
   return {
     async sendMessage(chatId, reply) {
-      if (!reply.text || reply.text.length > 4096) throw new TelegramError("API", "Panjang pesan Telegram tidak valid.");
-      await call("sendMessage", JSON.stringify({ chat_id: chatId, ...reply, link_preview_options: { is_disabled: true } }));
+      if (!reply.text || visibleLength(reply.text) > 4096) throw new TelegramError("API", "Panjang pesan Telegram tidak valid.");
+      // The message is escaped for HTML mode and gets the shared footer exactly once.
+      await call("sendMessage", JSON.stringify({
+        chat_id: chatId, ...reply, text: withFooter(reply.text), parse_mode: "HTML", link_preview_options: { is_disabled: true },
+      }));
     },
     async sendDocument(chatId, document, threadId) {
       if (!document.bytes.byteLength || document.bytes.byteLength > MAX_DOCUMENT_BYTES) {
@@ -38,15 +42,18 @@ export function createTelegramBot(fetcher: typeof fetch = fetch): TelegramBot {
       const form = new FormData();
       form.set("chat_id", String(chatId));
       if (threadId !== undefined) form.set("message_thread_id", String(threadId));
-      if (document.caption) form.set("caption", document.caption.slice(0, 1024));
+      if (document.caption) {
+        form.set("caption", withFooter(document.caption.slice(0, 900)));
+        form.set("parse_mode", "HTML");
+      }
       form.set("document", new Blob([document.bytes as Uint8Array<ArrayBuffer>], { type: document.mimeType }), document.filename);
       await call("sendDocument", form, 30_000);
     },
     async answerCallbackQuery(id) {
       await call("answerCallbackQuery", JSON.stringify({ callback_query_id: id }));
     },
-    async clearInlineKeyboard(chatId, messageId) {
-      await call("editMessageReplyMarkup", JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }));
+    async setInlineKeyboard(chatId, messageId, rows) {
+      await call("editMessageReplyMarkup", JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: rows } }));
     },
   };
 }

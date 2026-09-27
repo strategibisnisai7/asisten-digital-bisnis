@@ -6,7 +6,7 @@ import { executeInventoryIntent } from "../lib/inventory/inventory-engine";
 import type { InventoryProduct } from "../lib/inventory/inventory-engine";
 import { parseTransactionRows, type TransactionStore } from "../lib/inventory/transaction-service";
 import { parseRuleIntent } from "../lib/parser/rule-parser";
-import type { SupplierDirectory } from "../lib/supplier/supplier-service";
+import type { Supplier } from "../lib/supplier/supplier-service";
 import { handleTelegramUpdate, type AdapterDependencies } from "../lib/telegram/adapter";
 import { createTelegramBot } from "../lib/telegram/bot-service";
 import { callbackData, productButton, readCallback } from "../lib/telegram/callbacks";
@@ -30,13 +30,10 @@ const toRow = (p: InventoryProduct, i: number): StokItem => ({
   stokMinimum: p.minimumStock, statusStok: p.status, lokasiRak: p.rack, supplierUtama: p.supplier,
 });
 const rows: StokItem[] = [oil1, oil2, sugar, rice].map(toRow);
-const directory: SupplierDirectory = {
-  suppliers: [
-    { code: "SUP001", name: "PT Sumber Makmur", city: "Malang", contact: "083472087316", note: "Supplier aktif", whatsapp: "6283472087316" },
-    { code: "SUP002", name: "CV Berkah Jaya", city: "Malang", contact: "", note: "Supplier aktif", whatsapp: null },
-  ],
-  supplierCodeBySku: new Map([["BRG0006", "SUP001"], ["BRG0007", "SUP001"], ["BRG0010", "SUP001"], ["BRG0020", "SUP002"]]),
-};
+const suppliers: Supplier[] = [
+  { code: "SUP001", name: "PT Sumber Makmur", city: "Malang", contact: "083472087316", note: "Supplier aktif", whatsapp: "6283472087316" },
+  { code: "SUP002", name: "CV Berkah Jaya", city: "Malang", contact: "", note: "Supplier aktif", whatsapp: null },
+];
 const context = { chatId: 42, secret };
 const TECHNICAL = /intent|parser|engine|candidate|kandidat|debug|halaman 1\/1|page \d|error|SUCCESS|NOT_FOUND|\bnull\b|undefined/i;
 // Case-sensitive on purpose: "Pesanan" contains "nan", and the welcome text
@@ -59,11 +56,11 @@ function button(reply: TelegramReply, label: string): InlineButton {
   assert.ok(found, `button ${label}`);
   return found;
 }
-function callback(reply: TelegramReply, target: InlineButton, chatId = 42) {
-  return { update_id: 2, callback_query: { id: "query-id", data: target.callback_data, from: { id: 7, username: "kasir" }, message: { message_id: 99, chat: { id: chatId }, text: reply.text, reply_markup: reply.reply_markup } } };
+function callback(reply: TelegramReply, target: InlineButton, chatId = 42, userId = 7) {
+  return { update_id: 2, callback_query: { id: "query-id", data: target.callback_data, from: { id: userId, username: "kasir" }, message: { message_id: 99, chat: { id: chatId }, text: reply.text, reply_markup: reply.reply_markup } } };
 }
-const replyTo = (text: string, original: Pick<TelegramReply, "text">) => ({
-  update_id: 3, message: { chat: { id: 42 }, from: { id: 7, username: "kasir" }, text, reply_to_message: { text: original.text, from: { id: 1, is_bot: true } } },
+const replyTo = (text: string, original: Pick<TelegramReply, "text">, userId = 7) => ({
+  update_id: 3, message: { chat: { id: 42 }, from: { id: userId, username: "kasir" }, text, reply_to_message: { text: original.text, from: { id: 1, is_bot: true } } },
 });
 
 /**
@@ -77,7 +74,7 @@ function harness(options: { writeEnabled?: boolean; formulaBroken?: boolean; fai
   const intents: string[] = [];
   const source = structuredClone(rows);
   const acknowledgments: string[] = [];
-  const cleared: number[] = [];
+  const keyboards: { messageId: number; rows: (InlineButton | UrlButton)[][] }[] = [];
   const writes: StokCellWrite[][] = [];
   const history: (string | number)[][] = [];
   let reads = 0;
@@ -105,7 +102,7 @@ function harness(options: { writeEnabled?: boolean; formulaBroken?: boolean; fai
       async sendMessage(_id: number, reply: TelegramReply) { sent.push(reply); },
       async sendDocument(_id: number, document: TelegramDocument) { documents.push(document); },
       async answerCallbackQuery(id: string) { acknowledgments.push(id); },
-      async clearInlineKeyboard(_chat: number, messageId: number) { cleared.push(messageId); },
+      async setInlineKeyboard(_chat: number, messageId: number, rowsToSet: (InlineButton | UrlButton)[][]) { keyboards.push({ messageId, rows: rowsToSet }); },
     },
     execute: (async (intent) => { intents.push(intent.intent); return executeInventoryIntent(intent, async () => { reads++; return source; }); }) as typeof executeInventoryIntent,
     stock: {
@@ -114,19 +111,21 @@ function harness(options: { writeEnabled?: boolean; formulaBroken?: boolean; fai
       read: async () => { stockReads++; return structuredClone(source); },
       transactions,
     },
-    supplier: { readDirectory: async () => directory },
+    supplier: { readSuppliers: async () => suppliers },
     report: { readTransactions: async () => parseTransactionRows(history) },
   };
   return {
-    sent, documents, intents, source, acknowledgments, dependencies, writes, history, cleared,
+    sent, documents, intents, source, acknowledgments, dependencies, writes, history, keyboards,
+    /** Messages whose buttons were removed. */
+    get cleared() { return keyboards.filter((entry) => entry.rows.length === 0).map((entry) => entry.messageId); },
     get reads() { return reads; },
     get stockReads() { return stockReads; },
     get last() { return sent.at(-1)!; },
     advance(ms: number) { clock += ms; },
     stockOf: (sku: string) => source.find((item) => item.sku === sku)!.stokAkhir,
     say: (text: string) => handleTelegramUpdate(message(text), dependencies),
-    reply: (text: string, original: Pick<TelegramReply, "text">) => handleTelegramUpdate(replyTo(text, original), dependencies),
-    tap: (reply: TelegramReply, label: string) => handleTelegramUpdate(callback(reply, button(reply, label)), dependencies),
+    reply: (text: string, original: Pick<TelegramReply, "text">, userId = 7) => handleTelegramUpdate(replyTo(text, original, userId), dependencies),
+    tap: (reply: TelegramReply, label: string, userId = 7) => handleTelegramUpdate(callback(reply, button(reply, label), 42, userId), dependencies),
   };
 }
 
@@ -160,10 +159,10 @@ test("every main-menu label opens its flow instead of UNKNOWN", async () => {
     first[label] = h.sent[before].text;
   }
   assert.match(first["🔍 Cek Stok"], /^🔍 Cek Stok\n\nKetik nama barang atau SKU yang ingin dicek\.\n\nContoh:\n• minyak goreng/);
-  assert.match(first["📝 Update Stok"], /^📝 Update Stok\n\nPilih jenis perubahan:/);
+  assert.match(first["📝 Update Stok"], /^📝 Update Stok\n\n🔎 Cari barang yang ingin diperbarui\./);
   assert.match(first["⚠️ Stok Menipis"], /^⚠️ Stok Menipis\n\nAda 1 barang yang perlu diperhatikan:/);
   assert.match(first["📋 Cari Barang"], /^📋 Cari Barang\n\nKetik nama barang atau SKU/);
-  assert.equal(first["📞 Hubungi Supplier"], "📞 Hubungi Supplier");
+  assert.equal(first["📞 Hubungi Supplier"], "📞 Hubungi Supplier\n\nPilih supplier:");
   assert.equal(first["📊 Laporan"], "📊 Sedang menyiapkan laporan bulan ini...");
   assert.match(first["❓ Bantuan"], /^❓ Bantuan/);
   assert.ok(h.sent.every((reply) => !reply.text.includes("belum paham")));
@@ -304,206 +303,251 @@ test("help lists examples that all work when typed", async () => {
   await h.say("bantuan");
   assert.match(h.last.text, /^❓ Bantuan\n\nKamu bisa langsung bertanya seperti:\n\n🔍 "stok minyak goreng"/);
   assert.deepEqual(HELP_EXAMPLES.map(([, example]) => parseRuleIntent(example).intent),
-    ["CHECK_STOCK", "CHECK_STOCK", "LOW_STOCK", "SEARCH_PRODUCT", "ADD_STOCK", "CREATE_ORDER"]);
+    ["CHECK_STOCK", "CHECK_STOCK", "LOW_STOCK", "SEARCH_PRODUCT", "ADD_STOCK", "CONTACT_SUPPLIER"]);
 });
 
-// ---------------------------------------------------------------- stock updates
+// ---------------------------------------------------------------- 📝 Update Stok: product-first
 
-const SUMMARY_REF = /\n\nKode: UPD-[0-9A-Z]+-[0-9A-F]{12}$/;
+const SEAL = /\n\nKode: (?:UPD|QTY)-[0-9A-Z]+-[0-9A-F]{12}$/;
+const withoutSeal = (reply: TelegramReply) => reply.text.replace(SEAL, "");
+/** The detail message as it looks after its buttons were replaced (e.g. by "Batal"). */
+function withKeyboard(reply: TelegramReply, rows: (InlineButton | UrlButton)[][]): TelegramReply {
+  return { text: reply.text, reply_markup: { inline_keyboard: rows } };
+}
 
-test("update stock menu opens a prompt per change type; a reply to it builds the summary", async () => {
+/** Walks 📝 Update Stok → search → pick → action and returns the messages seen. */
+async function startUpdate(h: ReturnType<typeof harness>, query: string, product: string | null, action: string) {
+  await h.say("📝 Update Stok");
+  const searchPrompt = h.last;
+  await h.reply(query, searchPrompt);
+  const results = h.last;
+  if (product) await h.tap(results, product);
+  const detail = h.last;
+  await h.tap(detail, action);
+  return { searchPrompt, results, detail, quantityPrompt: h.last };
+}
+
+test("Update Stok asks for a search term first, not for change types", async () => {
   const h = harness();
   await h.say("📝 Update Stok");
-  const menu = h.last;
-  assert.deepEqual(buttons(menu).map((b) => b.text), ["📥 Barang Masuk", "📤 Barang Keluar", "🔄 Koreksi Stok", "⬅️ Kembali"]);
-  await h.tap(menu, "Barang Masuk");
+  assert.equal(h.last.text, "📝 Update Stok\n\n🔎 Cari barang yang ingin diperbarui.\n\nKetik nama barang atau SKU.\n\nContoh:\nberas");
+  assert.deepEqual(h.last.reply_markup, { force_reply: true, input_field_placeholder: "Nama barang atau SKU" });
+  assert.doesNotMatch(h.last.text, /Barang Masuk|Barang Keluar|Koreksi/);
+  // Bare commands also start with the search, never with "nama barang + jumlah".
+  for (const input of ["update stok", "barang masuk", "koreksi stok", "keluar"]) {
+    await h.say(input);
+    assert.match(h.last.text, /^📝 Update Stok\n\n🔎 Cari barang/, input);
+  }
+});
+
+test("search: several matches show product-name buttons; one match opens the detail; none offers Cari Lagi", async () => {
+  const h = harness();
+  await h.say("📝 Update Stok");
   const prompt = h.last;
-  assert.match(prompt.text, /^📥 Barang Masuk\n\nKetik barang dan jumlah yang masuk\./);
-  assert.deepEqual(prompt.reply_markup, { force_reply: true, input_field_placeholder: "minyak 20, gula 30, beras 50" });
-  await h.reply("gula 30, beras 50", prompt);
-  assert.match(h.last.text, /^📥 Barang Masuk\n\nBerikut perubahan stok:\n\n• Gula Pasir 1kg · BRG0010/);
-  await h.tap(menu, "Koreksi Stok");
-  assert.match(h.last.text, /^🔄 Koreksi Stok\n\nKetik barang dan stok akhir yang benar\./);
-  await h.tap(menu, "Kembali");
-  assert.match(h.last.text, /^📦 Menu Utama/);
+  await h.reply("minyak goreng", prompt);
+  assert.equal(h.last.text, "🔎 Saya menemukan 2 barang untuk \"minyak goreng\".\n\nSilakan pilih:");
+  assert.deepEqual(buttons(h.last).map((b) => b.text), ["📦 Minyak Goreng 1L", "📦 Minyak Goreng 2L", "🔎 Cari Lagi"]);
+  const pick = parseTelegramEvent(callback(h.last, button(h.last, "Minyak Goreng 2L")));
+  assert.ok(pick?.kind === "callback");
+  assert.deepEqual(readCallback(pick, secret), { kind: "upd_pick", sku: "BRG0007" }, "the selected SKU travels in the button");
+
+  await h.reply("gula", prompt);
+  assert.match(h.last.text, /^📦 Gula Pasir 1kg\n\nStok saat ini\n14 kg\n\n🟡 Menipis\n/);
+
+  await h.reply("sabun xyz", prompt);
+  assert.equal(h.last.text, "⚠️ Barang tidak ditemukan\n\nSaya belum menemukan barang dengan nama:\n\"sabun xyz\"\n\nSilakan coba kata kunci lain.");
+  assert.deepEqual(buttons(h.last).map((b) => b.text), ["🔎 Cari Lagi", "⬅️ Kembali"]);
+  await h.tap(h.last, "Cari Lagi");
+  assert.match(h.last.text, /^📝 Update Stok\n\n🔎 Cari barang/);
   assert.equal(h.writes.length, 0);
 });
 
-test("ADD_STOCK single item: summary, confirm, column E, and one history row", async () => {
+test("product detail shows the product and all three change types; Kembali returns to the results", async () => {
   const h = harness();
-  await h.say("tambah stok gula 30");
-  const summary = h.last;
-  assert.equal(summary.text.replace(SUMMARY_REF, ""), [
-    "📥 Barang Masuk", "", "Berikut perubahan stok:", "", "• Gula Pasir 1kg · BRG0010", "  +30 kg", "  14 → 44", "", "Simpan perubahan?",
+  await h.say("📝 Update Stok");
+  await h.reply("minyak goreng", h.last);
+  const results = h.last;
+  await h.tap(results, "Minyak Goreng 1L");
+  const detail = h.last;
+  assert.equal(detail.text, [
+    "📦 Minyak Goreng 1L", "", "Stok saat ini", "82 botol", "", "🟢 Aman", "", "Stok minimum", "20 botol",
+    "", "Lokasi", "Rak A-03", "", "SKU", "BRG0006", "", "Supplier", "PT Sumber Makmur", "", "Apa yang ingin dilakukan?",
   ].join("\n"));
-  assert.match(summary.text, SUMMARY_REF);
-  assert.deepEqual(buttons(summary).map((b) => b.text), ["✅ Konfirmasi", "❌ Batal"]);
+  assert.deepEqual(buttons(detail).map((b) => b.text), ["📥 Barang Masuk", "📤 Barang Keluar", "🔄 Koreksi Stok", "⬅️ Kembali"]);
+  await h.tap(detail, "Kembali");
+  assert.equal(h.last.text, results.text);
+});
+
+test("Barang Masuk: number only, preview, confirm, column E, history, success", async () => {
+  const h = harness();
+  const { detail, quantityPrompt } = await startUpdate(h, "minyak goreng", "Minyak Goreng 1L", "Barang Masuk");
+  // The detail keeps the product but now offers only "Batal"; no new search is asked.
+  assert.deepEqual(h.keyboards.at(-1)!.rows.flat().map((b) => b.text), ["❌ Batal"]);
+  assert.equal(withoutSeal(quantityPrompt), [
+    "📥 Barang Masuk", "", "📦 Minyak Goreng 1L", "SKU: BRG0006", "Stok saat ini: 82 botol", "",
+    "Masukkan jumlah barang yang masuk.", "Contoh:", "20", "", "Ketik \"batal\" untuk kembali.",
+  ].join("\n"));
+  assert.match(quantityPrompt.text, SEAL);
+  assert.deepEqual(quantityPrompt.reply_markup, { force_reply: true, input_field_placeholder: "Contoh: 20" });
+  assert.ok(detail.text.startsWith("📦 Minyak Goreng 1L"));
+
+  for (const invalid of ["20 kg", "dua puluh", "beras 20", "beras medium 20 kg", "0", "1,5"]) {
+    await h.reply(invalid, quantityPrompt);
+    assert.match(h.last.text, /^⚠️ Jumlah tidak valid\n\n/, invalid);
+    assert.match(h.last.text, /📥 Barang Masuk\n\n📦 Minyak Goreng 1L/, "the prompt is repeated for the same product");
+  }
+  assert.equal(h.writes.length, 0);
+
+  await h.reply("20", quantityPrompt);
+  const preview = h.last;
+  assert.equal(withoutSeal(preview), [
+    "📥 Konfirmasi Barang Masuk", "", "📦 Minyak Goreng 1L", "SKU: BRG0006", "",
+    "Stok saat ini : 82 botol", "Barang masuk : +20 botol", "Stok setelah : 102 botol",
+  ].join("\n"));
+  assert.deepEqual(buttons(preview).map((b) => b.text), ["✅ Konfirmasi", "❌ Batal"]);
   assert.equal(h.writes.length, 0, "nothing is written before confirmation");
 
-  await h.tap(summary, "Konfirmasi");
-  assert.deepEqual(h.writes, [[{ rowNumber: 4, column: "E", value: 30 }]]);
-  assert.equal(h.stockOf("BRG0010"), 44);
-  assert.deepEqual(h.cleared, [99]);
-  assert.equal(h.last.text, [
-    "✅ Stok berhasil diperbarui", "", "1 barang telah diperbarui:", "", "• Gula Pasir 1kg", "  14 → 44 kg",
-    "", "Semua perubahan berhasil disimpan.", "ID transaksi: TRX-001",
+  await h.tap(preview, "Konfirmasi");
+  assert.deepEqual(h.writes, [[{ rowNumber: 2, column: "E", value: 20 }]]);
+  assert.equal(h.stockOf("BRG0006"), 102);
+  assert.equal(h.last.text, "✅ Stok berhasil diperbarui\n\n📦 Minyak Goreng 1L\n\n82 botol → 102 botol\nBarang masuk: +20 botol\n\nID transaksi: TRX-001");
+  assert.deepEqual(h.history, [["TRX-001", "27/09/2026", "10:15", "MASUK", "BRG0006", "Minyak Goreng 1L", 20, "botol", 82, 102, "@kasir (7)", ""]]);
+  assert.ok(h.cleared.includes(99), "the preview buttons are removed after confirming");
+});
+
+test("Barang Keluar: more than the stock is refused, then column F and history", async () => {
+  const h = harness();
+  const { quantityPrompt } = await startUpdate(h, "gula", null, "Barang Keluar");
+  assert.match(quantityPrompt.text, /^📤 Barang Keluar\n\n📦 Gula Pasir 1kg\nSKU: BRG0010\nStok saat ini: 14 kg\n\nMasukkan jumlah barang yang keluar\./);
+  await h.reply("15", quantityPrompt);
+  assert.match(h.last.text, /^⚠️ Stok tidak mencukupi\n\nStok saat ini:\n14 kg\n\nJumlah barang keluar tidak boleh melebihi stok\./);
+  await h.reply("abc", quantityPrompt);
+  assert.match(h.last.text, /^⚠️ Jumlah tidak valid/);
+  assert.equal(h.writes.length, 0);
+
+  await h.reply("4", quantityPrompt);
+  assert.equal(withoutSeal(h.last), [
+    "📤 Konfirmasi Barang Keluar", "", "📦 Gula Pasir 1kg", "SKU: BRG0010", "",
+    "Stok saat ini : 14 kg", "Barang keluar : -4 kg", "Stok setelah : 10 kg",
   ].join("\n"));
-  assert.deepEqual(h.history, [["TRX-001", "27/09/2026", "10:15", "MASUK", "BRG0010", "Gula Pasir 1kg", 30, "kg", 14, 44, "@kasir (7)", ""]]);
+  await h.tap(h.last, "Konfirmasi");
+  assert.deepEqual(h.writes, [[{ rowNumber: 4, column: "F", value: 4 }]]);
+  assert.equal(h.last.text, "✅ Stok berhasil diperbarui\n\n📦 Gula Pasir 1kg\n\n14 kg → 10 kg\nBarang keluar: -4 kg\n\nID transaksi: TRX-001");
+  assert.deepEqual(h.history[0].slice(3, 10), ["KELUAR", "BRG0010", "Gula Pasir 1kg", 4, "kg", 14, 10]);
 });
 
-test("ADD_STOCK multi item: one atomic commit to column E and one transaction ID for every row", async () => {
+test("Koreksi Stok is product-first too: search, pick, detail, target, adjustment in column G", async () => {
   const h = harness();
-  await h.say("barang masuk: minyak goreng 1l 20, gula 30, beras 50");
-  const summary = h.last;
-  assert.match(summary.text, /• Minyak Goreng 1L · BRG0006\n  \+20 botol\n  82 → 102\n\n• Gula Pasir 1kg · BRG0010\n  \+30 kg\n  14 → 44\n\n• Beras Premium 5kg · BRG0020\n  \+50 karung\n  40 → 90/);
-  await h.tap(summary, "Konfirmasi");
-  assert.equal(h.writes.length, 1, "a single commit");
-  assert.deepEqual(h.writes[0], [
-    { rowNumber: 2, column: "E", value: 20 }, { rowNumber: 4, column: "E", value: 30 }, { rowNumber: 5, column: "E", value: 50 },
-  ]);
-  assert.deepEqual([h.stockOf("BRG0006"), h.stockOf("BRG0010"), h.stockOf("BRG0020")], [102, 44, 90]);
-  assert.deepEqual(h.history.map((row) => [row[0], row[3], row[4], row[6]]), [["TRX-001", "MASUK", "BRG0006", 20], ["TRX-001", "MASUK", "BRG0010", 30], ["TRX-001", "MASUK", "BRG0020", 50]]);
-});
+  // No shortcut: the correction starts from a search like the others.
+  await h.say("koreksi stok");
+  assert.match(h.last.text, /^📝 Update Stok\n\n🔎 Cari barang/);
+  const { detail, quantityPrompt } = await startUpdate(h, "minyak goreng", "Minyak Goreng 1L", "Koreksi Stok");
+  assert.match(detail.text, /Apa yang ingin dilakukan\?$/);
+  assert.match(quantityPrompt.text, /^🔄 Koreksi Stok\n\n📦 Minyak Goreng 1L\nSKU: BRG0006\nStok saat ini: 82 botol\n\nMasukkan jumlah stok yang benar\.\nContoh:\n150/);
+  await h.reply("82", quantityPrompt);
+  assert.match(h.last.text, /^⚠️ Stok tidak berubah/);
 
-test("REDUCE_STOCK single and multi item write column F", async () => {
-  const h = harness();
-  await h.say("keluar gula 4");
+  await h.reply("50", quantityPrompt);
+  assert.equal(withoutSeal(h.last), [
+    "🔄 Konfirmasi Koreksi Stok", "", "📦 Minyak Goreng 1L", "SKU: BRG0006", "",
+    "Stok saat ini : 82 botol", "Stok baru     : 50 botol", "Penyesuaian   : -32 botol",
+  ].join("\n"));
   await h.tap(h.last, "Konfirmasi");
-  assert.deepEqual(h.writes[0], [{ rowNumber: 4, column: "F", value: 4 }]);
-  assert.equal(h.stockOf("BRG0010"), 10);
-
-  await h.say("barang keluar beras 10 dan minyak goreng 1l 5");
-  const summary = h.last;
-  assert.match(summary.text, /^📤 Barang Keluar\n\nBerikut perubahan stok:\n\n• Beras Premium 5kg · BRG0020\n  -10 karung\n  40 → 30\n\n• Minyak Goreng 1L · BRG0006\n  -5 botol\n  82 → 77/);
-  await h.tap(summary, "Konfirmasi");
-  assert.deepEqual(h.writes[1], [{ rowNumber: 5, column: "F", value: 10 }, { rowNumber: 2, column: "F", value: 5 }]);
-  assert.deepEqual(h.history.map((row) => [row[0], row[3], row[6]]), [["TRX-001", "KELUAR", 4], ["TRX-002", "KELUAR", 10], ["TRX-002", "KELUAR", 5]]);
-});
-
-test("SET_STOCK adds (target − current) to column G, never H", async () => {
-  const h = harness();
-  await h.say("koreksi stok gula jadi 20");
-  assert.match(h.last.text, /^🔄 Koreksi Stok\n\nBerikut perubahan stok:\n\n• Gula Pasir 1kg · BRG0010\n  14 → 20\n/);
-  await h.tap(h.last, "Konfirmasi");
-  assert.deepEqual(h.writes[0], [{ rowNumber: 4, column: "G", value: 6 }]);
-
-  await h.say("koreksi stok minyak goreng 1l jadi 50, gula jadi 18");
-  await h.tap(h.last, "Konfirmasi");
-  // 50 − 82 = −32 for oil; gula already has +6, so 6 + (18 − 20) = 4.
-  assert.deepEqual(h.writes[1], [{ rowNumber: 2, column: "G", value: -32 }, { rowNumber: 4, column: "G", value: 4 }]);
-  assert.deepEqual([h.stockOf("BRG0006"), h.stockOf("BRG0010")], [50, 18]);
+  // Adjustment = target − current = 50 − 82.
+  assert.deepEqual(h.writes, [[{ rowNumber: 2, column: "G", value: -32 }]]);
   assert.ok(h.writes.flat().every((cell) => cell.column !== ("H" as string)));
-  assert.deepEqual(h.history.slice(1).map((row) => [row[3], row[6], row[8], row[9], row[11]]), [["KOREKSI", -32, 82, 50, "Koreksi ke 50"], ["KOREKSI", -2, 20, 18, "Koreksi ke 18"]]);
+  assert.equal(h.stockOf("BRG0006"), 50);
+  assert.equal(h.last.text, "✅ Stok berhasil dikoreksi\n\n📦 Minyak Goreng 1L\n\n82 botol → 50 botol\nPenyesuaian: -32 botol\n\nID transaksi: TRX-001");
+  assert.deepEqual(h.history[0].slice(3, 12), ["KOREKSI", "BRG0006", "Minyak Goreng 1L", -32, "botol", 82, 50, "@kasir (7)", "Koreksi ke 50"]);
 });
 
-test("validation before write: not found, ambiguous, invalid, zero, and negative quantities never write", async () => {
+test("state: Batal on the quantity step and on the preview return to the product detail", async () => {
   const h = harness();
-  await h.say("tambah minyak goreng 1l 20, gula 30, barang xyz 10");
-  assert.equal(h.last.text, [
-    "⚠️ Update belum dilakukan", "", "Saya menemukan:", "",
-    "✓ Minyak Goreng 1L — +20 botol", "✓ Gula Pasir 1kg — +30 kg", "✕ \"barang xyz\" — tidak ditemukan",
-    "", "Silakan perbaiki barang yang belum ditemukan.",
-  ].join("\n"));
-  await h.say("tambah stok minyak");
-  assert.equal(h.last.text, "⚠️ Jumlah tidak valid\n\n• \"minyak\" — jumlah belum ditulis atau bukan angka\n\nContoh yang benar:\n\"minyak 20\"");
-  await h.say("tambah stok gula 0");
-  assert.match(h.last.text, /"gula" — jumlah harus lebih dari 0/);
-  await h.say("keluar gula -5");
-  assert.match(h.last.text, /"gula" — jumlah tidak boleh negatif/);
-  await h.say("keluar gula 15");
-  assert.match(h.last.text, /✕ "Gula Pasir 1kg" — stok tidak cukup \(tersedia 14 kg\)/);
-  await h.say(`tambah stok ${Array.from({ length: 21 }, (_, i) => `barang${i} 1`).join(", ")}`);
-  assert.match(h.last.text, /Maksimal 20 barang dalam satu update/);
+  const { detail, quantityPrompt } = await startUpdate(h, "gula", null, "Barang Masuk");
+  const waiting = withKeyboard(detail, h.keyboards.at(-1)!.rows);
+  await h.tap(waiting, "Batal");
+  assert.match(h.last.text, /^📦 Gula Pasir 1kg[\s\S]*Apa yang ingin dilakukan\?$/);
+  assert.ok(h.cleared.includes(99));
+
+  await h.reply("batal", quantityPrompt);
+  assert.match(h.last.text, /^📦 Gula Pasir 1kg[\s\S]*Apa yang ingin dilakukan\?$/);
+
+  await h.reply("10", quantityPrompt);
+  const preview = h.last;
+  await h.tap(preview, "Batal");
+  assert.match(h.last.text, /^📦 Gula Pasir 1kg[\s\S]*Apa yang ingin dilakukan\?$/);
   assert.equal(h.writes.length, 0);
-  assert.equal(h.history.length, 0);
-  assert.deepEqual(h.source, rows, "no partial write: the sheet is unchanged");
+  // The cancelled preview cannot be confirmed afterwards by a stale button: it re-checks stock,
+  // but nothing was written, so the summary is still valid; buttons were removed instead.
+  assert.ok(h.cleared.filter((id) => id === 99).length >= 2);
 });
 
-test("ambiguous product: choose by name, then the request continues to the summary", async () => {
+test("state: after confirming, the same preview cannot write again", async () => {
   const h = harness();
-  await h.say("tambah stok minyak 20, gula 30");
-  const choice = h.last;
-  assert.match(choice.text, /^🔎 "minyak" bisa berarti:\n\nPilih barang yang dimaksud\.\n\nPermintaan:\nbarang masuk: minyak 20, gula 30$/);
-  assert.deepEqual(buttons(choice).map((b) => b.text), ["📦 Minyak Goreng 1L", "📦 Minyak Goreng 2L", "❌ Batal"]);
-  await h.tap(choice, "Minyak Goreng 2L");
-  assert.match(h.last.text, /• Minyak Goreng 2L · BRG0007\n  \+20 botol\n  80 → 100\n\n• Gula Pasir 1kg · BRG0010/);
-  const event = parseTelegramEvent(callback({ ...choice, text: choice.text.replace("minyak 20", "minyak 2000") }, button(choice, "Minyak Goreng 2L")));
-  assert.ok(event?.kind === "callback");
-  assert.equal(readCallback(event, secret), null);
-  assert.equal(h.writes.length, 0);
-});
-
-test("duplicate products are merged into one change; conflicting corrections are refused", async () => {
-  const h = harness();
-  await h.say("📝 Update Stok");
-  await h.tap(h.last, "Barang Masuk");
-  await h.reply("gula 20, gula pasir 1kg 10", h.last);
-  assert.match(h.last.text, /• Gula Pasir 1kg · BRG0010\n  \+30 kg \(20 \+ 10\)\n  14 → 44/);
-  await h.tap(h.last, "Konfirmasi");
-  assert.deepEqual(h.writes, [[{ rowNumber: 4, column: "E", value: 30 }]]);
-  await h.say("koreksi stok gula jadi 20, gula jadi 25");
-  assert.match(h.last.text, /✕ "Gula Pasir 1kg" — ditulis lebih dari sekali dengan jumlah berbeda/);
-  assert.equal(h.writes.length, 1);
-});
-
-test("confirmation belongs to its pending transaction: a loose 'ya' never writes", async () => {
-  const h = harness();
-  await h.say("tambah stok gula 30");
-  const summary = h.last;
-  await h.say("ya");
-  assert.match(h.last.text, /^Tidak ada yang perlu dikonfirmasi/);
-  assert.equal(h.writes.length, 0);
-  await h.reply("ya", summary);
-  assert.match(h.last.text, /^✅ Stok berhasil diperbarui/);
-  // A second confirmation of the same summary does not write again.
-  await h.tap(summary, "Konfirmasi");
+  const { quantityPrompt } = await startUpdate(h, "gula", null, "Barang Masuk");
+  await h.reply("10", quantityPrompt);
+  const preview = h.last;
+  await h.tap(preview, "Konfirmasi");
+  await h.tap(preview, "Konfirmasi");
   assert.equal(h.last.text, "✅ Update ini sudah tersimpan sebelumnya.\n\nTidak ada perubahan tambahan yang dilakukan.");
   assert.equal(h.writes.length, 1);
   assert.equal(h.history.length, 1);
 });
 
-test("cancel: button or reply 'batal' discards the update", async () => {
+test("state: user B cannot use user A's buttons, quantity prompt, or preview", async () => {
   const h = harness();
-  await h.say("tambah stok gula 30");
-  const summary = h.last;
-  await h.tap(summary, "Batal");
-  assert.equal(h.last.text, "❌ Update dibatalkan.\n\nTidak ada perubahan stok yang dilakukan.");
-  assert.deepEqual(h.cleared, [99]);
-  await h.reply("batal", summary);
-  assert.equal(h.last.text, "❌ Update dibatalkan.\n\nTidak ada perubahan stok yang dilakukan.");
+  const { detail, quantityPrompt } = await startUpdate(h, "gula", null, "Barang Masuk");
+  await h.tap(detail, "Barang Keluar", 8);
+  assert.match(h.last.text, /sudah tidak berlaku/);
+  await h.reply("10", quantityPrompt, 8);
+  assert.doesNotMatch(h.last.text, /Konfirmasi Barang Masuk/, "the other user's number is not read as a quantity");
+  await h.reply("10", quantityPrompt);
+  const preview = h.last;
+  await h.tap(preview, "Konfirmasi", 8);
+  assert.match(h.last.text, /^Ringkasan ini tidak dapat diproses/);
   assert.equal(h.writes.length, 0);
 });
 
-test("changed stock, expired, altered, or user-typed summaries cannot be confirmed", async () => {
+test("changed stock, expired prompts, and altered previews cannot be confirmed", async () => {
   const h = harness();
-  await h.say("tambah stok gula 30");
-  const summary = h.last;
+  const { quantityPrompt } = await startUpdate(h, "gula", null, "Barang Masuk");
+  await h.reply("10", quantityPrompt);
+  const preview = h.last;
   h.source[2].stokAkhir = 20;
-  await h.tap(summary, "Konfirmasi");
-  assert.match(h.last.text, /^⚠️ Update belum dilakukan\n\nStok berubah sejak ringkasan dibuat:\n• Gula Pasir 1kg: sekarang 20 kg \(di ringkasan 14\)/);
+  await h.tap(preview, "Konfirmasi");
+  assert.match(h.last.text, /^⚠️ Update belum dilakukan\n\nStok berubah sejak ringkasan dibuat:/);
 
   const late = harness();
-  await late.say("tambah stok gula 30");
-  const old = late.last;
+  const started = await startUpdate(late, "gula", null, "Barang Masuk");
   late.advance(31 * 60 * 1000);
-  await late.tap(old, "Konfirmasi");
-  assert.match(late.last.text, /^⌛ Ringkasan ini sudah kedaluwarsa/);
+  await late.reply("10", started.quantityPrompt);
+  assert.match(late.last.text, /^⌛ /);
 
   const forged = harness();
-  await forged.say("tambah stok gula 30");
-  const altered = { ...forged.last, text: forged.last.text.replace("14 → 44", "14 → 4400") };
+  const flow = await startUpdate(forged, "gula", null, "Barang Masuk");
+  await forged.reply("10", flow.quantityPrompt);
+  const altered = { ...forged.last, text: forged.last.text.replace("Stok setelah : 24 kg", "Stok setelah : 2400 kg") };
   await handleTelegramUpdate(callback(altered, button(forged.last, "Konfirmasi")), forged.dependencies);
   assert.match(forged.last.text, /^Ringkasan ini tidak dapat diproses/);
-  await forged.reply("ya", { text: "📥 Barang Masuk\n\nBerikut perubahan stok:\n\n• Gula Pasir 1kg · BRG0010\n  +30 kg\n  14 → 44" });
-  assert.match(forged.last.text, /^Tidak ada yang perlu dikonfirmasi/);
   assert.equal(h.writes.length + late.writes.length + forged.writes.length, 0);
+});
+
+test("the footer Telegram sends back does not break sealed prompts and previews", async () => {
+  const h = harness();
+  const { quantityPrompt } = await startUpdate(h, "gula", null, "Barang Masuk");
+  await h.reply("10", { text: `${quantityPrompt.text}\n\nFile stok XLS: Lihat File` });
+  const preview = h.last;
+  assert.match(preview.text, /^📥 Konfirmasi Barang Masuk/);
+  await handleTelegramUpdate(callback({ ...preview, text: `${preview.text}\n\nFile stok XLS: Lihat File` }, button(preview, "Konfirmasi")), h.dependencies);
+  assert.match(h.last.text, /^✅ Stok berhasil diperbarui/);
 });
 
 test("with writes disabled, confirmation stops before Google Sheets", async () => {
   assert.equal(isStockWriteEnabled({}), false);
   assert.equal(isStockWriteEnabled({ TELEGRAM_STOCK_WRITE_ENABLED: "true" }), true);
   const h = harness({ writeEnabled: false });
-  await h.say("tambah stok gula 30");
+  const { quantityPrompt } = await startUpdate(h, "gula", null, "Barang Masuk");
+  await h.reply("10", quantityPrompt);
   await h.tap(h.last, "Konfirmasi");
   assert.match(h.last.text, /^🔒 Penyimpanan belum diaktifkan/);
   assert.equal(h.writes.length + h.history.length, 0);
@@ -515,9 +559,10 @@ test("a failed commit changes neither stock nor history; unverified totals are r
   console.error = (...args: unknown[]) => { logged.push(args.join(" ")); };
   try {
     const failing = harness({ failCommit: true });
-    await failing.say("tambah stok minyak goreng 1l 20, gula 30");
+    const { quantityPrompt } = await startUpdate(failing, "gula", null, "Barang Masuk");
+    await failing.reply("10", quantityPrompt);
     await failing.tap(failing.last, "Konfirmasi");
-    assert.equal(failing.last.text, "❌ Update gagal disimpan\n\nTidak ada perubahan stok yang tersimpan. Silakan coba lagi beberapa saat lagi.");
+    assert.equal(failing.last.text, "⚠️ Stok belum berhasil diperbarui. Silakan coba lagi.");
     assert.deepEqual(failing.source, rows);
     assert.equal(failing.history.length, 0);
     assert.doesNotMatch(JSON.stringify(failing.sent) + logged.join(), /private-sensitive/);
@@ -532,76 +577,98 @@ test("a failed commit changes neither stock nor history; unverified totals are r
   }
 });
 
-// ---------------------------------------------------------------- contacting suppliers
+// ---------------------------------------------------------------- free-text stock commands (regression)
 
-test("Hubungi Supplier menu offers order, supplier list, search, and back", async () => {
+test("free text: single and multi item ADD with one atomic commit and one transaction ID", async () => {
   const h = harness();
-  await h.say("📞 Hubungi Supplier");
-  assert.equal(h.last.text, "📞 Hubungi Supplier");
-  assert.deepEqual(buttons(h.last).map((b) => b.text), ["📦 Pesan Barang", "📋 Lihat Supplier", "🔎 Cari Barang", "⬅️ Kembali"]);
-  const menu = h.last;
-  await h.tap(menu, "Cari Barang");
-  assert.match(h.last.text, /^📋 Cari Barang/);
-  await h.tap(menu, "Kembali");
-  assert.match(h.last.text, /^📦 Menu Utama/);
+  await h.say("tambah stok gula 30");
+  assert.equal(withoutSeal(h.last), [
+    "📥 Barang Masuk", "", "Berikut perubahan stok:", "", "• Gula Pasir 1kg · BRG0010", "  +30 kg", "  14 → 44", "", "Simpan perubahan?",
+  ].join("\n"));
+  await h.tap(h.last, "Konfirmasi");
+  assert.equal(h.last.text, "✅ Stok berhasil diperbarui\n\n📦 Gula Pasir 1kg\n\n14 kg → 44 kg\nBarang masuk: +30 kg\n\nID transaksi: TRX-001");
+
+  await h.say("barang masuk: minyak goreng 1l 20, beras 50");
+  await h.tap(h.last, "Konfirmasi");
+  assert.deepEqual(h.writes[1], [{ rowNumber: 2, column: "E", value: 20 }, { rowNumber: 5, column: "E", value: 50 }]);
+  assert.match(h.last.text, /^✅ Stok berhasil diperbarui\n\n2 barang telah diperbarui:/);
+  assert.deepEqual(h.history.slice(1).map((row) => [row[0], row[4]]), [["TRX-002", "BRG0006"], ["TRX-002", "BRG0020"]]);
 });
 
-test("Pesan Barang groups items per supplier with WhatsApp deep links and never touches stock", async () => {
+test("free text: 'minyak masuk 20' and 'beras keluar 10' still work; SET writes column G", async () => {
   const h = harness();
-  await h.say("📞 Hubungi Supplier");
-  await h.tap(h.last, "Pesan Barang");
-  const prompt = h.last;
-  assert.match(prompt.text, /^📦 Pesan Barang\n\nKetik barang dan jumlah yang dibutuhkan\./);
-  assert.deepEqual(prompt.reply_markup, { force_reply: true, input_field_placeholder: "minyak goreng 20, gula 30" });
+  await h.say("minyak goreng 1l masuk 20");
+  assert.match(h.last.text, /^📥 Barang Masuk\n\nBerikut perubahan stok:\n\n• Minyak Goreng 1L · BRG0006\n  \+20 botol/);
+  await h.say("beras keluar 10");
+  assert.match(h.last.text, /^📤 Barang Keluar\n\nBerikut perubahan stok:\n\n• Beras Premium 5kg · BRG0020\n  -10 karung/);
+  await h.tap(h.last, "Konfirmasi");
+  assert.deepEqual(h.writes[0], [{ rowNumber: 5, column: "F", value: 10 }]);
+  await h.say("koreksi stok minyak goreng 1l jadi 50, gula jadi 18");
+  await h.tap(h.last, "Konfirmasi");
+  assert.deepEqual(h.writes[1], [{ rowNumber: 2, column: "G", value: -32 }, { rowNumber: 4, column: "G", value: 4 }]);
+});
 
-  await h.reply("minyak goreng 1l 20, gula 30, beras 5", prompt);
-  const request = h.last;
-  assert.equal(request.text, [
-    "📋 Kebutuhan Barang", "", "PT Sumber Makmur", "", "• Minyak Goreng 1L — 20 botol", "• Gula Pasir 1kg — 30 kg",
-    "", "CV Berkah Jaya", "", "• Beras Premium 5kg — 5 karung", "Kontak WhatsApp belum tersedia.",
-    "", "Hubungi supplier melalui WhatsApp?",
-  ].join("\n"));
-  const [first, second] = links(request);
-  assert.equal(first.text, "💬 WhatsApp PT Sumber Makmur");
-  assert.ok(first.url.startsWith("https://wa.me/6283472087316?text="));
-  assert.equal(decodeURIComponent(first.url.split("?text=")[1]), [
-    "Halo PT Sumber Makmur,", "", "Kami dari PT Indah Merta Anugerah ingin memesan:",
-    "• Minyak Goreng 1L — 20 botol", "• Gula Pasir 1kg — 30 kg", "", "Mohon informasi ketersediaan dan harganya. Terima kasih.",
-  ].join("\n"));
-  assert.equal(second.text, "💬 Bagikan via WhatsApp (CV Berkah Jaya)");
-  assert.ok(second.url.startsWith("https://wa.me/?text="));
-  assert.deepEqual(buttons(request).map((b) => b.text), ["❌ Batal"]);
-
-  await h.tap(request, "Batal");
-  assert.equal(h.last.text, "❌ Dibatalkan.\n\nTidak ada pesan yang dikirim ke supplier.");
-  assert.equal(h.writes.length + h.history.length, 0);
+test("free text: validation before write and no partial write when one item fails", async () => {
+  const h = harness();
+  await h.say("tambah minyak goreng 1l 20, gula 30, barang xyz 10");
+  assert.match(h.last.text, /^⚠️ Update belum dilakukan[\s\S]*✕ "barang xyz" — tidak ditemukan/);
+  await h.say("tambah stok minyak");
+  assert.match(h.last.text, /^⚠️ Jumlah tidak valid/);
+  await h.say("keluar gula 15");
+  assert.match(h.last.text, /stok tidak cukup \(tersedia 14 kg\)/);
+  await h.say("tambah stok minyak 20, gula 30");
+  assert.match(h.last.text, /^🔎 "minyak" bisa berarti:/);
+  await h.tap(h.last, "Minyak Goreng 2L");
+  assert.match(h.last.text, /• Minyak Goreng 2L · BRG0007\n  \+20 botol/);
+  await h.say("barang masuk: gula 20, gula pasir 1kg 10");
+  assert.match(h.last.text, /\+30 kg \(20 \+ 10\)/, "duplicates are merged");
+  assert.equal(h.writes.length, 0);
   assert.deepEqual(h.source, rows);
 });
 
-test("free-text supplier requests: 'butuh …' for one supplier, and unclear items", async () => {
+test("free text: a loose 'ya' never writes; reply 'ya' or 'batal' to the summary does", async () => {
   const h = harness();
-  await h.say("butuh minyak goreng 1l 20 botol dan gula 30 kg");
-  assert.match(h.last.text, /^📋 Kebutuhan Barang\n\nPT Sumber Makmur\n\n• Minyak Goreng 1L — 20 botol\n• Gula Pasir 1kg — 30 kg\n\nHubungi supplier melalui WhatsApp\?$/);
-  assert.equal(links(h.last)[0].text, "💬 WhatsApp Supplier");
-  await h.say("butuh minyak goreng 20");
-  assert.match(h.last.text, /Ada 2 barang yang cocok dengan "minyak goreng":\n• Minyak Goreng 1L\n• Minyak Goreng 2L/);
-  await h.say("butuh sabun xyz 3");
-  assert.match(h.last.text, /Saya belum menemukan barang dengan nama:\n"sabun xyz"/);
-  await h.say("🛒 Buat Pesanan");
-  assert.match(h.last.text, /^📦 Pesan Barang/, "old keyboards still reach the new flow");
+  await h.say("tambah stok gula 30");
+  const summary = h.last;
+  await h.say("ya");
+  assert.match(h.last.text, /^Tidak ada yang perlu dikonfirmasi/);
+  await h.reply("batal", summary);
+  assert.equal(h.last.text, "❌ Update dibatalkan.\n\nTidak ada perubahan stok yang dilakukan.");
   assert.equal(h.writes.length, 0);
+  await h.reply("ya", summary);
+  assert.match(h.last.text, /^✅ Stok berhasil diperbarui/);
+  assert.equal(h.writes.length, 1);
 });
 
-test("Lihat Supplier lists suppliers with WhatsApp buttons where a number exists", async () => {
+// ---------------------------------------------------------------- supplier directory
+
+test("Hubungi Supplier lists suppliers; a supplier's detail offers WhatsApp only with a number", async () => {
   const h = harness();
   await h.say("📞 Hubungi Supplier");
-  await h.tap(h.last, "Lihat Supplier");
-  assert.equal(h.last.text, [
-    "📋 Daftar Supplier", "",
-    "🏢 PT Sumber Makmur", "Kota: Malang", "Kontak: 083472087316", "Keterangan: Supplier aktif", "",
-    "🏢 CV Berkah Jaya", "Kota: Malang", "Kontak: -", "Keterangan: Supplier aktif", "Kontak WhatsApp belum tersedia.",
-  ].join("\n"));
-  assert.deepEqual(links(h.last), [{ text: "💬 WhatsApp PT Sumber Makmur", url: "https://wa.me/6283472087316" }]);
+  const list = h.last;
+  assert.equal(list.text, "📞 Hubungi Supplier\n\nPilih supplier:");
+  assert.deepEqual(buttons(list).map((b) => b.text), ["🏢 PT Sumber Makmur", "🏢 CV Berkah Jaya", "⬅️ Kembali"]);
+
+  await h.tap(list, "PT Sumber Makmur");
+  assert.equal(h.last.text, "🏢 PT Sumber Makmur\n\nKota: Malang\nKontak: 083472087316\nKeterangan: Supplier aktif");
+  assert.deepEqual(links(h.last), [{ text: "💬 Hubungi via WhatsApp", url: "https://wa.me/6283472087316" }]);
+  await h.tap(h.last, "Kembali");
+  assert.equal(h.last.text, list.text);
+
+  await h.tap(list, "CV Berkah Jaya");
+  assert.equal(h.last.text, "🏢 CV Berkah Jaya\n\nKota: Malang\nKontak: -\nKeterangan: Supplier aktif\n\nKontak WhatsApp belum tersedia.");
+  assert.deepEqual(links(h.last), []);
+});
+
+test("no ordering flow remains: order phrases open the supplier directory and never touch stock", async () => {
+  const h = harness();
+  for (const input of ["🛒 Buat Pesanan", "butuh minyak goreng 20", "pesan gula 30"]) {
+    await h.say(input);
+    assert.equal(h.last.text, "📞 Hubungi Supplier\n\nPilih supplier:", input);
+  }
+  assert.doesNotMatch(h.sent.map((reply) => reply.text).join("\n"), /Pesan Barang|Kebutuhan Barang/);
+  assert.equal(h.writes.length + h.history.length, 0);
+  assert.deepEqual(h.source, rows);
 });
 
 // ---------------------------------------------------------------- report
@@ -683,7 +750,7 @@ test("inventory failures show a human message and keep technical details out of 
   try {
     const failing = { ...h.dependencies, execute: async () => { throw new Error("private-sensitive-sentinel"); } };
     await handleTelegramUpdate(message("stok minyak"), failing);
-    await handleTelegramUpdate(message("butuh gula 5"), failing);
+    await handleTelegramUpdate(message("cari gula"), failing);
   } finally {
     console.error = originalError;
   }
@@ -718,18 +785,27 @@ test("Telegram transport: JSON messages, multipart documents, and no token-beari
   try {
     const requests: { url: string; body: unknown }[] = [];
     const bot = createTelegramBot(async (url, options) => { requests.push({ url: String(url), body: options?.body }); return Response.json({ ok: true }); });
-    await bot.sendMessage(42, productDetailReply(oil1));
+    await bot.sendMessage(42, productDetailReply({ ...oil1, name: "Minyak <b>Goreng</b> & Co" }));
     await bot.sendDocument(42, { filename: "laporan-stok-transaksi-2026-09.pdf", bytes: new Uint8Array([37, 80, 68, 70]), mimeType: "application/pdf", caption: "Laporan" }, 5);
     await bot.answerCallbackQuery("test-id");
+    await bot.setInlineKeyboard!(42, 99, []);
     const message = JSON.parse(String(requests[0].body));
     assert.equal(message.chat_id, 42);
-    assert.equal("parse_mode" in message, false);
+    assert.equal(message.parse_mode, "HTML");
+    // Sheet content is escaped, and the footer is appended exactly once at the very end.
+    assert.match(message.text, /^📦 Minyak &lt;b&gt;Goreng&lt;\/b&gt; &amp; Co\n/);
+    assert.ok(message.text.endsWith('\n\n<i>File stok XLS: <a href="https://tinyurl.com/faststock">Lihat File</a></i>'));
+    assert.equal((message.text.match(/Lihat File/g) ?? []).length, 1);
+    assert.doesNotMatch(message.text.replace(/href="[^"]+"/, ""), /tinyurl/, "the URL is not shown as text");
     assert.ok(requests[1].url.endsWith("/sendDocument"));
     const form = requests[1].body as FormData;
     assert.equal(form.get("chat_id"), "42");
     assert.equal(form.get("message_thread_id"), "5");
+    assert.equal(form.get("parse_mode"), "HTML");
+    assert.match(String(form.get("caption")), /^Laporan\n\n<i>File stok XLS: /);
     assert.equal((form.get("document") as File).name, "laporan-stok-transaksi-2026-09.pdf");
     assert.equal(JSON.parse(String(requests[2].body)).callback_query_id, "test-id");
+    assert.deepEqual(JSON.parse(String(requests[3].body)), { chat_id: 42, message_id: 99, reply_markup: { inline_keyboard: [] } });
     const failed = createTelegramBot(async () => { throw new Error("https://api.telegram.org/botprivate-sensitive-sentinel/sendMessage"); });
     await assert.rejects(failed.sendMessage(42, productDetailReply(oil1)), (error: unknown) => {
       assert.ok(error instanceof Error);
